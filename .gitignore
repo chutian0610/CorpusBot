@@ -9,6 +9,7 @@
 node_modules/
 dist/
 coverage/
+.vite/
 src-tauri/gen/
 *.local
 

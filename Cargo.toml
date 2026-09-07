@@ -30,7 +30,11 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
 thiserror = "2"
+time = { version = "0.3", features = ["macros", "serde", "parsing", "formatting"] }
+unicode-normalization = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [workspace.lints.rust]
