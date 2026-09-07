@@ -1,0 +1,19 @@
+# Design drafts are intentionally excluded.
+.design.md
+
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+coverage/
+src-tauri/gen/
+*.local
+
+# Engine-private workspace state is always ignored in generated wikis.
+.wiki-db/
+
+# OS
+.DS_Store

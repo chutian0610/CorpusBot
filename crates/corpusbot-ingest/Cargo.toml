@@ -1,0 +1,14 @@
+[package]
+name = "corpusbot-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corpusbot-agent.workspace = true
+corpusbot-core.workspace = true
+corpusbot-search.workspace = true
+corpusbot-store.workspace = true
+corpusbot-vcs.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

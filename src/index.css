@@ -1,0 +1,7 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-ink: #17212b;
+  --color-paper: #f7f5f1;
+  --color-moss: #206b58;
+}
