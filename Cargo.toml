@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/corpusbot-core",
+    "crates/corpusbot-store",
+    "crates/corpusbot-vcs",
+    "crates/corpusbot-search",
+    "crates/corpusbot-ingest",
+    "crates/corpusbot-lint",
+    "crates/corpusbot-agent",
+    "crates/corpusbot-cli",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/didi/CorpusBot"
+
+[workspace.dependencies]
+corpusbot-core = { path = "crates/corpusbot-core" }
+corpusbot-store = { path = "crates/corpusbot-store" }
+corpusbot-vcs = { path = "crates/corpusbot-vcs" }
+corpusbot-search = { path = "crates/corpusbot-search" }
+corpusbot-ingest = { path = "crates/corpusbot-ingest" }
+corpusbot-lint = { path = "crates/corpusbot-lint" }
+corpusbot-agent = { path = "crates/corpusbot-agent" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unwrap_in_result = "warn"

@@ -1,0 +1,9 @@
+[package]
+name = "corpusbot-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corpusbot-core.workspace = true
+thiserror.workspace = true
