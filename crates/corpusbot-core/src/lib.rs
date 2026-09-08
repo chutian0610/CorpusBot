@@ -13,6 +13,7 @@ pub mod template;
 pub use date::IsoDate;
 pub use document::WikiDoc;
 pub use error::{CoreError, Result};
+pub use frontmatter::Frontmatter;
 pub use identity::PageIdentity;
 pub use link::Wikilink;
 pub use page_type::PageType;

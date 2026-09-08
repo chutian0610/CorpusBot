@@ -631,9 +631,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "corpusbot-agent",
  "corpusbot-core",
+ "corpusbot-ingest",
  "corpusbot-store",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -658,8 +661,16 @@ dependencies = [
  "corpusbot-search",
  "corpusbot-store",
  "corpusbot-vcs",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.20",
+ "time",
  "tokio",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

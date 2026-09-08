@@ -5,9 +5,10 @@ pub mod workspace;
 
 pub use error::{Result, StoreError};
 pub use lock::{LockOwner, WorkspaceLock};
-pub use metadata::{Metadata, PageRow};
+pub use metadata::{Metadata, PageRow, SourceRow};
 pub use workspace::{
-    SnapshotResult, SnapshotRow, Workspace, WorkspacePaths, WorkspaceStatus, WorkspaceSummary,
+    IngestCommitRequest, IngestCommitResult, PageFile, SnapshotResult, SnapshotRow, Workspace,
+    WorkspacePaths, WorkspaceStatus, WorkspaceSummary,
 };
 
 #[cfg(test)]
