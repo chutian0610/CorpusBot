@@ -235,6 +235,10 @@ impl Workspace {
         Ok(Vec::new())
     }
 
+    pub fn pages(&self) -> Result<Vec<crate::metadata::PageRow>> {
+        self.metadata.pages()
+    }
+
     pub fn status(&self) -> Result<WorkspaceStatus> {
         self.refresh_pages()?;
         Ok(WorkspaceStatus {
