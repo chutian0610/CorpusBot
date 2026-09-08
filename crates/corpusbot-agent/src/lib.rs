@@ -9,7 +9,10 @@ pub use audit::{AuditSink, FileAuditSink, WorkflowAuditEvent};
 pub use config::ProviderConfig;
 pub use error::{AgentError, Result};
 pub use llm::{FakeLlmClient, LlmClient, LlmRequest, LlmResponse, RigLlmClient};
-pub use task::{ConceptAnalysis, DraftPlan, EntityAnalysis, SourceAgent, SourceAnalysis};
+pub use task::{
+    Citation, ConceptAnalysis, DraftPlan, EntityAnalysis, QueryAnswer, QueryContextPage,
+    SourceAgent, SourceAnalysis,
+};
 pub use workflow::{AttemptStatus, Transition, WorkflowNode, WorkflowOutcome};
 
 pub const MAX_ATTEMPTS: u32 = 2;

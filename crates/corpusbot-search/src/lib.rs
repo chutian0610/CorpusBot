@@ -9,3 +9,8 @@ mod tests {
         assert_eq!(SEARCH_INDEX_DIR, ".wiki-db/tantivy");
     }
 }
+pub mod error;
+pub mod index;
+
+pub use error::{Result, SearchError};
+pub use index::{SearchDocument, SearchGeneration, SearchHit, SearchIndex};

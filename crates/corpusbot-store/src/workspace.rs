@@ -255,6 +255,11 @@ impl Workspace {
         )
     }
 
+    pub fn read_page(&self, path: &str) -> Result<String> {
+        corpusbot_core::WikiPath::parse(path)?;
+        Ok(std::fs::read_to_string(self.paths.root.join(path))?)
+    }
+
     pub fn source_by_sha(&self, sha256: &str) -> Result<Option<crate::SourceRow>> {
         self.metadata.source_by_sha(sha256)
     }

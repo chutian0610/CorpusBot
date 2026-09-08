@@ -21,6 +21,8 @@ pub enum IngestError {
     #[error(transparent)]
     Vcs(#[from] corpusbot_vcs::VcsError),
     #[error(transparent)]
+    Search(#[from] corpusbot_search::SearchError),
+    #[error(transparent)]
     SerdeYaml(#[from] serde_yaml::Error),
     #[error(transparent)]
     WalkDir(#[from] walkdir::Error),
