@@ -687,6 +687,7 @@ dependencies = [
  "corpusbot-agent",
  "corpusbot-core",
  "corpusbot-ingest",
+ "corpusbot-lint",
  "corpusbot-search",
  "corpusbot-store",
  "serde_json",
@@ -732,7 +733,12 @@ name = "corpusbot-lint"
 version = "0.1.0"
 dependencies = [
  "corpusbot-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
  "thiserror 2.0.20",
+ "time",
+ "walkdir",
 ]
 
 [[package]]

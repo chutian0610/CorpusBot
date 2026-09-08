@@ -1,3 +1,10 @@
+pub mod engine;
+pub mod error;
+pub mod report;
+
+pub use error::{LintError, Result};
+pub use report::{LintIssue, LintReport, LintSummary, Severity};
+
 pub const RESERVED_PAGE_PATHS: [&str; 2] = ["wiki/index.md", "wiki/log.md"];
 
 pub fn is_reserved_page(path: &str) -> bool {
