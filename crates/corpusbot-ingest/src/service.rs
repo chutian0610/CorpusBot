@@ -255,6 +255,7 @@ where
             baseline_manifest: baseline,
         };
         let committed = workspace.commit_ingest(&request)?;
+        rebuild_index(workspace)?;
 
         Ok(IngestResult::Committed {
             run_id: committed.run_id,
@@ -649,6 +650,41 @@ fn source_row(value: &corpusbot_core::SourceRecord) -> Result<SourceRow> {
 
 fn hex(content: &[u8]) -> String {
     format!("{:x}", Sha256::digest(content))
+}
+
+fn rebuild_index(workspace: &Workspace) -> Result<()> {
+    let lock =
+        corpusbot_store::WorkspaceLock::acquire(&workspace.paths().root, "search-index-rebuild")?;
+    let mut documents = Vec::new();
+    for entry in walkdir::WalkDir::new(workspace.paths().wiki_dir.clone()).sort_by_file_name() {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .strip_prefix(workspace.paths().root.clone())
+            .map_err(|error| IngestError::Core(corpusbot_core::CoreError::Path(error.to_string())))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let markdown = std::fs::read_to_string(entry.path())?;
+        if let Ok((document, _)) =
+            WikiDoc::parse_markdown(corpusbot_core::WikiPath::parse(&path)?, &markdown)
+        {
+            documents.push(corpusbot_search::SearchDocument {
+                path,
+                title: document.frontmatter().title().to_owned(),
+                page_type: document.frontmatter().page_type().as_str().to_owned(),
+                tags: document.frontmatter().tags().to_vec(),
+                body: markdown,
+                updated_at: document.frontmatter().updated().to_string(),
+            });
+        }
+    }
+    corpusbot_search::SearchIndex::new(workspace.paths().search_index.clone())
+        .rebuild(&documents)?;
+    drop(lock);
+    Ok(())
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
