@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension};
+use serde::Serialize;
 
 use crate::error::Result;
 
@@ -8,7 +9,7 @@ pub struct Metadata {
     connection: Connection,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PageRow {
     pub path: String,
     pub title: String,

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
 
 use corpusbot_agent::{DraftPlan, LlmClient, SourceAgent, SourceAnalysis};
@@ -44,6 +45,27 @@ where
         Self {
             agent: SourceAgent::new(client),
         }
+    }
+
+    pub async fn ingest_content(
+        &self,
+        workspace: &Workspace,
+        original_name: &str,
+        markdown: &str,
+    ) -> Result<IngestResult> {
+        let extension = Path::new(original_name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("md");
+        let mut temporary = tempfile::Builder::new()
+            .prefix("corpusbot-import-")
+            .suffix(&format!(".{extension}"))
+            .tempfile()?;
+        std::io::Write::write_all(&mut temporary, markdown.as_bytes())?;
+        temporary.flush()?;
+        let result = self.ingest_file(workspace, temporary.path()).await?;
+        temporary.close()?;
+        Ok(result)
     }
 
     pub async fn ingest_file(

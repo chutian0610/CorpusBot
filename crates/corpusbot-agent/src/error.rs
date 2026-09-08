@@ -36,4 +36,8 @@ pub enum AgentError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    Persist(#[from] tempfile::PersistError),
+    #[error(transparent)]
+    ConfigurationSource(#[from] std::fmt::Error),
 }
