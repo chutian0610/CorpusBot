@@ -27,7 +27,9 @@ corpusbot-ingest = { path = "crates/corpusbot-ingest" }
 corpusbot-lint = { path = "crates/corpusbot-lint" }
 corpusbot-agent = { path = "crates/corpusbot-agent" }
 anyhow = "1"
+async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
+dirs = "6"
 git2 = "0.20"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +41,8 @@ sha2 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["macros", "serde", "parsing", "formatting"] }
 unicode-normalization = "0.1"
+uuid = { version = "1", features = ["serde", "v4"] }
+rig-core = "0.42"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [workspace.lints.rust]
