@@ -5,8 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 corpusbot-core.workspace = true
+dirs.workspace = true
+rig-core.workspace = true
 serde.workspace = true
+sha2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

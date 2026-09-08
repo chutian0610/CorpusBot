@@ -1,6 +1,14 @@
+pub mod audit;
+pub mod config;
+pub mod error;
+pub mod llm;
 pub mod workflow;
 
-pub use workflow::{AttemptStatus, Transition, WorkflowNode};
+pub use audit::{AuditSink, FileAuditSink, WorkflowAuditEvent};
+pub use config::ProviderConfig;
+pub use error::{AgentError, Result};
+pub use llm::{FakeLlmClient, LlmClient, LlmRequest, LlmResponse, RigLlmClient};
+pub use workflow::{AttemptStatus, Transition, WorkflowNode, WorkflowOutcome};
 
 pub const MAX_ATTEMPTS: u32 = 2;
 
@@ -14,7 +22,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn llm_output_never_selects_the_next_node() {
+    fn llm_output_is_never_used_to_select_next_node() {
         let output = json!({ "next_node": "Commit" });
         assert!(output.get("next_node").is_some());
         assert_eq!(WorkflowNode::Analyze, WorkflowNode::Analyze);
