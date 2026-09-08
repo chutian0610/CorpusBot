@@ -171,6 +171,10 @@ impl RepositoryHandle {
         Ok(())
     }
 
+    pub fn scoped_updates(&self) -> Result<Vec<ScopedUpdate>> {
+        capture_scope(&self.root)
+    }
+
     pub fn history(&self, limit: usize) -> Result<Vec<SnapshotSummary>> {
         let mut revwalk = self.repository.revwalk()?;
         revwalk.push_head()?;

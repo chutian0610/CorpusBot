@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use corpusbot_core::{Template, WikiDoc};
+use corpusbot_core::{ResourceId, ResourceRevision, RevisionManifest, Template, WikiDoc};
 use corpusbot_vcs::ScopedUpdate;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -75,6 +75,33 @@ pub struct SnapshotRow {
     pub snapshot_id: String,
     pub message: String,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PageFile {
+    pub path: String,
+    pub markdown: String,
+    pub title: String,
+    pub page_type: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct IngestCommitRequest {
+    pub run_id: String,
+    pub message: String,
+    pub source: Option<crate::SourceRow>,
+    pub files: Vec<(String, Vec<u8>)>,
+    pub pages: Vec<PageFile>,
+    pub touched: Vec<ResourceRevision>,
+    pub baseline_manifest: RevisionManifest,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IngestCommitResult {
+    pub run_id: String,
+    pub snapshot_id: String,
+    pub manifest_id: String,
 }
 
 pub struct Workspace {
@@ -221,6 +248,130 @@ impl Workspace {
         })
     }
 
+    pub fn revision_manifest(&self) -> Result<RevisionManifest> {
+        capture_revision_manifest(
+            &self.paths.root,
+            &self.repository.head_id()?.unwrap_or_default(),
+        )
+    }
+
+    pub fn source_by_sha(&self, sha256: &str) -> Result<Option<crate::SourceRow>> {
+        self.metadata.source_by_sha(sha256)
+    }
+
+    pub fn write_draft(&self, run_id: &str, relative: &str, content: &[u8]) -> Result<PathBuf> {
+        ResourceId::new(relative)?;
+        let path = self.paths.drafts.join(run_id).join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file =
+            tempfile::NamedTempFile::new_in(path.parent().expect("draft parent exists"))?;
+        std::io::Write::write_all(&mut file, content)?;
+        file.persist(&path)?;
+        Ok(path)
+    }
+
+    pub fn write_raw_source(&self, relative: &str, content: &[u8]) -> Result<()> {
+        ResourceId::new(relative)?;
+        let full = self.paths.root.join(relative);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = tempfile::NamedTempFile::new_in(full.parent().expect("raw parent exists"))?;
+        std::io::Write::write_all(&mut file, content)?;
+        file.persist(full)?;
+        Ok(())
+    }
+
+    pub fn commit_ingest(&self, request: &IngestCommitRequest) -> Result<IngestCommitResult> {
+        let lock = WorkspaceLock::acquire(&self.paths.root, "ingest-commit")?;
+        if self.metadata.has_pending_recovery()? {
+            return Err(StoreError::RecoveryPending);
+        }
+        if let Some(state) = self.repository.unsafe_state() {
+            return Err(corpusbot_vcs::VcsError::UnsafeState(state).into());
+        }
+
+        let head = self.repository.head_id()?.unwrap_or_default();
+        let current = capture_revision_manifest(&self.paths.root, &head)?;
+        for touched in &request.touched {
+            let found = current.expected(touched.resource());
+            if found != *touched.revision() {
+                return Err(corpusbot_core::CoreError::RevisionConflict {
+                    resource: touched.resource().path().to_owned(),
+                    expected: touched.revision().key(),
+                    current: found.key(),
+                }
+                .into());
+            }
+        }
+
+        let mut old_content = BTreeMap::new();
+        let mut updates = self.repository.scoped_updates()?;
+        for (path, content) in &request.files {
+            let full = self.paths.root.join(path);
+            if full.exists() {
+                old_content.insert(path.clone(), std::fs::read(&full)?);
+            }
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file =
+                tempfile::NamedTempFile::new_in(full.parent().ok_or_else(|| {
+                    StoreError::Core(corpusbot_core::CoreError::Path(path.clone()))
+                })?)?;
+            std::io::Write::write_all(&mut file, content)?;
+            file.persist(&full)?;
+            updates.retain(|update| update.path() != path);
+            updates.push(ScopedUpdate::put(path.clone(), content.clone()));
+        }
+
+        let transaction = self.metadata.unchecked_transaction()?;
+        if let Some(source) = &request.source {
+            crate::metadata::Metadata::insert_source_tx(&transaction, source)?;
+        }
+        for page in &request.pages {
+            crate::metadata::Metadata::upsert_page_tx(
+                &transaction,
+                &crate::metadata::PageRow {
+                    path: page.path.clone(),
+                    title: page.title.clone(),
+                    page_type: page.page_type.clone(),
+                    sha256: hex(page.markdown.as_bytes()),
+                    updated_at: page.updated_at.clone(),
+                },
+            )?;
+        }
+
+        let snapshot = match self.repository.commit_scoped(
+            &request.message,
+            &updates,
+            &[("CorpusBot-Run", request.run_id.as_str())],
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                for (path, content) in old_content {
+                    let full = self.paths.root.join(path);
+                    if let Some(parent) = full.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(full, content)?;
+                }
+                return Err(error.into());
+            }
+        };
+        transaction.commit()?;
+        let manifest = capture_revision_manifest(&self.paths.root, &snapshot.commit_id)?;
+        drop(lock);
+
+        Ok(IngestCommitResult {
+            run_id: request.run_id.clone(),
+            snapshot_id: snapshot.commit_id,
+            manifest_id: manifest.manifest_id().to_owned(),
+        })
+    }
+
     pub fn snapshot(&self, message: &str) -> Result<SnapshotResult> {
         let lock = WorkspaceLock::acquire(&self.paths.root, "snapshot")?;
         let head_before = self.repository.head_id()?;
@@ -279,7 +430,7 @@ impl Workspace {
     }
 }
 
-fn capture_manifest(root: &Path, head_snapshot_id: &str) -> Result<String> {
+pub fn capture_revision_manifest(root: &Path, head_snapshot_id: &str) -> Result<RevisionManifest> {
     let mut resources = Vec::new();
     for directory in ["wiki", "raw"] {
         let full = root.join(directory);
@@ -311,8 +462,13 @@ fn capture_manifest(root: &Path, head_snapshot_id: &str) -> Result<String> {
         corpusbot_core::ResourceId::new(".gitignore")?,
         &gitignore,
     ));
-    let manifest = corpusbot_core::RevisionManifest::capture(resources, head_snapshot_id)?;
-    Ok(manifest.manifest_id().to_owned())
+    Ok(RevisionManifest::capture(resources, head_snapshot_id)?)
+}
+
+fn capture_manifest(root: &Path, head_snapshot_id: &str) -> Result<String> {
+    Ok(capture_revision_manifest(root, head_snapshot_id)?
+        .manifest_id()
+        .to_owned())
 }
 
 pub fn hex(content: &[u8]) -> String {

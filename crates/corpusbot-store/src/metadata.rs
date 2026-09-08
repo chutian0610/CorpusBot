@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::Result;
 
@@ -15,6 +15,16 @@ pub struct PageRow {
     pub page_type: String,
     pub sha256: String,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceRow {
+    pub source_id: String,
+    pub source_version_id: String,
+    pub sha256: String,
+    pub original_name: String,
+    pub size: u64,
+    pub imported_at: String,
 }
 
 impl Metadata {
@@ -151,6 +161,70 @@ impl Metadata {
             .prepare("SELECT 1 FROM sources WHERE sha256 = ?1")?;
         let exists = statement.exists(rusqlite::params![sha256])?;
         Ok(exists)
+    }
+
+    pub fn source_by_sha(&self, sha256: &str) -> Result<Option<SourceRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT source_id, source_version_id, sha256, original_name, size, imported_at
+             FROM sources WHERE sha256 = ?1",
+        )?;
+        let source = statement
+            .query_row(rusqlite::params![sha256], |row| {
+                Ok(SourceRow {
+                    source_id: row.get(0)?,
+                    source_version_id: row.get(1)?,
+                    sha256: row.get(2)?,
+                    original_name: row.get(3)?,
+                    size: row.get(4)?,
+                    imported_at: row.get(5)?,
+                })
+            })
+            .optional()?;
+        Ok(source)
+    }
+
+    pub fn insert_source_tx(connection: &Connection, source: &SourceRow) -> Result<()> {
+        connection.execute(
+            "INSERT INTO sources(source_id, source_version_id, sha256, original_name, size, imported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                source.source_id,
+                source.source_version_id,
+                source.sha256,
+                source.original_name,
+                source.size,
+                source.imported_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_page_tx(connection: &Connection, page: &PageRow) -> Result<()> {
+        Self::upsert_page_on(connection, page)
+    }
+
+    pub fn unchecked_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(self.connection.unchecked_transaction()?)
+    }
+
+    fn upsert_page_on(connection: &Connection, page: &PageRow) -> Result<()> {
+        connection.execute(
+            "INSERT INTO pages(path, title, page_type, sha256, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(path) DO UPDATE SET
+               title = excluded.title,
+               page_type = excluded.page_type,
+               sha256 = excluded.sha256,
+               updated_at = excluded.updated_at",
+            rusqlite::params![
+                page.path,
+                page.title,
+                page.page_type,
+                page.sha256,
+                page.updated_at
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn insert_source(

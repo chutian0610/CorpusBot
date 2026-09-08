@@ -23,6 +23,8 @@ pub enum StoreError {
     #[error(transparent)]
     WalkDir(#[from] walkdir::Error),
     #[error(transparent)]
+    Persist(#[from] tempfile::PersistError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),

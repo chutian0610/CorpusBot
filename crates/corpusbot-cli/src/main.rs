@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
+use corpusbot_agent::{ProviderConfig, RigLlmClient};
 use corpusbot_core::{Template, VERSION};
+use corpusbot_ingest::Ingestor;
 use corpusbot_store::Workspace;
 use serde_json::json;
 
@@ -51,6 +53,13 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Ingest one Markdown source.
+    Ingest {
+        #[arg(long)]
+        root: std::path::PathBuf,
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
 }
 
 fn parse_template(value: &str) -> anyhow::Result<Template> {
@@ -61,7 +70,8 @@ fn parse_template(value: &str) -> anyhow::Result<Template> {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { root, template } => {
@@ -108,6 +118,12 @@ fn main() -> anyhow::Result<()> {
             let workspace = Workspace::open(&root, Template::default_template())?;
             workspace.restore(&snapshot)?;
             println!("restored to {snapshot}");
+        }
+        Command::Ingest { root, file } => {
+            let workspace = Workspace::open(&root, Template::default_template())?;
+            let client = RigLlmClient::new(ProviderConfig::load()?)?;
+            let result = Ingestor::new(client).ingest_file(&workspace, &file).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
     }
     Ok(())
