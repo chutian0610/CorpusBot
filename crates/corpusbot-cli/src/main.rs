@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use corpusbot_agent::{ProviderConfig, QueryContextPage, RigLlmClient, SourceAgent};
 use corpusbot_core::{Template, VERSION};
 use corpusbot_ingest::Ingestor;
+use corpusbot_lint::engine::run_lint;
 use corpusbot_search::SearchIndex;
 use corpusbot_store::Workspace;
 use serde_json::json;
@@ -69,6 +70,13 @@ enum Command {
         question: String,
         #[arg(long, default_value_t = 8)]
         limit: usize,
+    },
+    /// Check workspace health without modifying files.
+    Lint {
+        #[arg(long)]
+        root: std::path::PathBuf,
+        #[arg(long, default_value = "json")]
+        format: String,
     },
 }
 
@@ -183,6 +191,34 @@ async fn main() -> anyhow::Result<()> {
 
             let answer = agent.answer_question(&question, &context).await?;
             println!("{}", serde_json::to_string_pretty(&answer)?);
+        }
+        Command::Lint { root, format } => {
+            let workspace = Workspace::open(&root, Template::default_template())?;
+            if workspace.status()?.recovery_pending {
+                anyhow::bail!("workspace has pending recovery");
+            }
+            let manifest = workspace.revision_manifest()?;
+            let report = run_lint(&root, workspace.template(), manifest.manifest_id())?;
+            match format.as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&report)?),
+                "table" => {
+                    println!(
+                        "pages={} errors={} warnings={}",
+                        report.summary.pages, report.summary.errors, report.summary.warnings
+                    );
+                    for issue in &report.issues {
+                        println!(
+                            "{:<8} {:<24} {}",
+                            issue.severity.as_str().to_uppercase(),
+                            issue.code,
+                            issue.message
+                        );
+                        println!("  path: {}", issue.path);
+                        println!("  hint: {}", issue.fix_hint);
+                    }
+                }
+                other => anyhow::bail!("unknown lint format: {other}"),
+            }
         }
     }
     Ok(())

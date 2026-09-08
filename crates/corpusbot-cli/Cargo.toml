@@ -14,6 +14,7 @@ corpusbot-agent.workspace = true
 clap.workspace = true
 corpusbot-core.workspace = true
 corpusbot-ingest.workspace = true
+corpusbot-lint.workspace = true
 corpusbot-search.workspace = true
 corpusbot-store.workspace = true
 serde_json.workspace = true

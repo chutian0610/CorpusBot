@@ -16,6 +16,7 @@ pub use error::{CoreError, Result};
 pub use frontmatter::Frontmatter;
 pub use identity::PageIdentity;
 pub use link::Wikilink;
+pub use link::extract_wikilinks;
 pub use page_type::PageType;
 pub use path::WikiPath;
 pub use resource::{ManifestId, ResourceId, ResourceRevision, Revision, RevisionManifest};
