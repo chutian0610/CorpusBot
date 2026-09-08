@@ -1,0 +1,437 @@
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use corpusbot_core::{Template, WikiDoc};
+use corpusbot_vcs::ScopedUpdate;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
+
+use crate::error::{Result, StoreError};
+use crate::lock::WorkspaceLock;
+use crate::metadata::Metadata;
+
+pub const GITIGNORE: &str = ".wiki-db/\n.DS_Store\nThumbs.db\n";
+pub const INDEX_TEMPLATE: &str = "# Index\n\nA generated catalog of Wiki pages.\n";
+pub const LOG_TEMPLATE: &str = "# Log\n\nAppend-only operation log.\n";
+pub const RAW_KEEP: &str = "raw/.gitkeep";
+
+#[derive(Clone, Debug)]
+pub struct WorkspacePaths {
+    pub root: PathBuf,
+    pub gitignore: PathBuf,
+    pub wiki_dir: PathBuf,
+    pub raw_dir: PathBuf,
+    pub engine_dir: PathBuf,
+    pub database: PathBuf,
+    pub drafts: PathBuf,
+    pub search_index: PathBuf,
+}
+
+impl WorkspacePaths {
+    pub fn new(root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref().to_path_buf();
+        Self {
+            gitignore: root.join(".gitignore"),
+            wiki_dir: root.join("wiki"),
+            raw_dir: root.join("raw"),
+            engine_dir: root.join(".wiki-db"),
+            database: root.join(".wiki-db/corpusbot.sqlite3"),
+            drafts: root.join(".wiki-db/drafts"),
+            search_index: root.join(".wiki-db/tantivy"),
+            root,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkspaceSummary {
+    pub root: String,
+    pub template: String,
+    pub head_snapshot_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkspaceStatus {
+    pub root: String,
+    pub template: String,
+    pub head_snapshot_id: Option<String>,
+    pub dirty_paths: Vec<String>,
+    pub unsafe_state: Option<String>,
+    pub recovery_pending: bool,
+    pub page_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SnapshotResult {
+    pub result: String,
+    pub snapshot_id: String,
+    pub manifest_id: String,
+    pub workspace_changed_after_capture: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SnapshotRow {
+    pub snapshot_id: String,
+    pub message: String,
+    pub created_at: i64,
+}
+
+pub struct Workspace {
+    paths: WorkspacePaths,
+    template: Template,
+    repository: corpusbot_vcs::RepositoryHandle,
+    metadata: Metadata,
+}
+
+impl Workspace {
+    pub fn init(root: impl AsRef<Path>, template: Template) -> Result<WorkspaceSummary> {
+        let root = root.as_ref();
+        if root.join(".git").exists() {
+            return Err(corpusbot_vcs::VcsError::RepositoryExists.into());
+        }
+        if root.exists() && !root.is_dir() {
+            return Err(StoreError::RootNotDirectory);
+        }
+        if root.exists() && root.read_dir()?.next().is_some() {
+            return Err(StoreError::RootNotEmpty);
+        }
+
+        std::fs::create_dir_all(root)?;
+        let repository = corpusbot_vcs::RepositoryHandle::init(root)?;
+        let paths = WorkspacePaths::new(root);
+        std::fs::create_dir_all(&paths.wiki_dir)?;
+        std::fs::create_dir_all(&paths.raw_dir)?;
+        std::fs::create_dir_all(&paths.drafts)?;
+        std::fs::create_dir_all(&paths.search_index)?;
+        std::fs::write(&paths.gitignore, GITIGNORE)?;
+        std::fs::write(paths.wiki_dir.join("index.md"), INDEX_TEMPLATE)?;
+        std::fs::write(paths.wiki_dir.join("log.md"), LOG_TEMPLATE)?;
+        std::fs::write(paths.raw_dir.join(".gitkeep"), "")?;
+
+        let metadata = Metadata::open(&paths.database)?;
+        metadata.set_meta("template", template.as_str())?;
+
+        let updates = vec![
+            ScopedUpdate::put(".gitignore", GITIGNORE),
+            ScopedUpdate::put("wiki/index.md", INDEX_TEMPLATE),
+            ScopedUpdate::put("wiki/log.md", LOG_TEMPLATE),
+            ScopedUpdate::put(RAW_KEEP, ""),
+        ];
+        let snapshot =
+            repository.commit_scoped(&format!("init {}", template.as_str()), &updates, &[])?;
+        Ok(WorkspaceSummary {
+            root: paths.root.display().to_string(),
+            template: template.as_str().to_owned(),
+            head_snapshot_id: Some(snapshot.commit_id),
+        })
+    }
+
+    pub fn open(root: impl AsRef<Path>, template: Template) -> Result<Self> {
+        let paths = WorkspacePaths::new(root.as_ref());
+        let repository = corpusbot_vcs::RepositoryHandle::open(&paths.root)?;
+        let metadata = Metadata::open(&paths.database)?;
+        let stored_template = metadata
+            .get_meta("template")?
+            .unwrap_or_else(|| template.as_str().to_owned());
+        let template = Template::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == stored_template)
+            .unwrap_or(template);
+
+        Ok(Self {
+            paths,
+            template,
+            repository,
+            metadata,
+        })
+    }
+
+    pub fn paths(&self) -> &WorkspacePaths {
+        &self.paths
+    }
+
+    pub fn template(&self) -> Template {
+        self.template
+    }
+
+    pub fn summary(&self) -> Result<WorkspaceSummary> {
+        Ok(WorkspaceSummary {
+            root: self.paths.root.display().to_string(),
+            template: self.template.as_str().to_owned(),
+            head_snapshot_id: self.repository.head_id()?,
+        })
+    }
+
+    pub fn refresh_pages(&self) -> Result<Vec<String>> {
+        let mut current = BTreeMap::new();
+        for entry in WalkDir::new(&self.paths.wiki_dir).sort_by_file_name() {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(&self.paths.root)
+                .map_err(|error| {
+                    StoreError::Core(corpusbot_core::CoreError::Path(error.to_string()))
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content = std::fs::read(entry.path())?;
+            let text = String::from_utf8_lossy(&content);
+            let Ok((doc, _)) =
+                WikiDoc::parse_markdown(corpusbot_core::WikiPath::parse(&relative)?, &text)
+            else {
+                continue;
+            };
+            let page = crate::metadata::PageRow {
+                path: relative.clone(),
+                title: doc.frontmatter().title().to_owned(),
+                page_type: doc.frontmatter().page_type().as_str().to_owned(),
+                sha256: hex(&content),
+                updated_at: doc.frontmatter().updated().to_string(),
+            };
+            self.metadata.upsert_page(&page)?;
+            current.insert(relative, ());
+        }
+
+        for path in self.metadata.page_paths()? {
+            if path.starts_with("wiki/")
+                && path != "wiki/index.md"
+                && path != "wiki/log.md"
+                && !current.contains_key(&path)
+            {
+                self.metadata.remove_page(&path)?;
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    pub fn status(&self) -> Result<WorkspaceStatus> {
+        self.refresh_pages()?;
+        Ok(WorkspaceStatus {
+            root: self.paths.root.display().to_string(),
+            template: self.template.as_str().to_owned(),
+            head_snapshot_id: self.repository.head_id()?,
+            dirty_paths: self.repository.dirty_paths()?,
+            unsafe_state: self.repository.unsafe_state(),
+            recovery_pending: self.metadata.has_pending_recovery()?,
+            page_count: self.metadata.pages()?.len(),
+        })
+    }
+
+    pub fn snapshot(&self, message: &str) -> Result<SnapshotResult> {
+        let lock = WorkspaceLock::acquire(&self.paths.root, "snapshot")?;
+        let head_before = self.repository.head_id()?;
+        if !self.repository.is_dirty()? {
+            let head = head_before.ok_or_else(|| StoreError::SnapshotNotFound("HEAD".into()))?;
+            let manifest_id = capture_manifest(&self.paths.root, head.as_str())?;
+            drop(lock);
+            return Ok(SnapshotResult {
+                result: "already_clean".to_owned(),
+                snapshot_id: head,
+                manifest_id,
+                workspace_changed_after_capture: false,
+            });
+        }
+
+        let snapshot = self.repository.snapshot_scoped(message, &[])?;
+        let manifest_id = capture_manifest(&self.paths.root, &snapshot.commit_id)?;
+        drop(lock);
+        Ok(SnapshotResult {
+            result: "created".to_owned(),
+            snapshot_id: snapshot.commit_id,
+            manifest_id,
+            workspace_changed_after_capture: false,
+        })
+    }
+
+    pub fn history(&self, limit: usize) -> Result<Vec<SnapshotRow>> {
+        Ok(self
+            .repository
+            .history(limit)?
+            .into_iter()
+            .map(|summary| SnapshotRow {
+                snapshot_id: summary.commit_id,
+                message: summary.message,
+                created_at: summary.created_at,
+            })
+            .collect())
+    }
+
+    pub fn restore(&self, snapshot_id: &str) -> Result<()> {
+        let lock = WorkspaceLock::acquire(&self.paths.root, "restore")?;
+        let selected = self.repository.scoped_content(snapshot_id)?;
+        let pre_restore = self
+            .repository
+            .snapshot_scoped(&format!("pre-restore {snapshot_id}"), &[])?;
+        let updates = selected
+            .iter()
+            .map(|(path, content)| ScopedUpdate::put(path.clone(), content.clone()))
+            .collect::<Vec<_>>();
+        self.repository
+            .commit_scoped(&format!("restore {snapshot_id}"), &updates, &[])?;
+        self.repository.checkout_head()?;
+        drop(lock);
+        let _ = pre_restore;
+        Ok(())
+    }
+}
+
+fn capture_manifest(root: &Path, head_snapshot_id: &str) -> Result<String> {
+    let mut resources = Vec::new();
+    for directory in ["wiki", "raw"] {
+        let full = root.join(directory);
+        if !full.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(full).sort_by_file_name() {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|error| {
+                    StoreError::Core(corpusbot_core::CoreError::Path(error.to_string()))
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content = std::fs::read(entry.path())?;
+            resources.push(corpusbot_core::ResourceRevision::content(
+                corpusbot_core::ResourceId::new(path)?,
+                &content,
+            ));
+        }
+    }
+    let gitignore = std::fs::read(root.join(".gitignore"))?;
+    resources.push(corpusbot_core::ResourceRevision::content(
+        corpusbot_core::ResourceId::new(".gitignore")?,
+        &gitignore,
+    ));
+    let manifest = corpusbot_core::RevisionManifest::capture(resources, head_snapshot_id)?;
+    Ok(manifest.manifest_id().to_owned())
+}
+
+pub fn hex(content: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(content))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    const PAGE: &str = r#"---
+type: entity
+title: Raft
+created: 2026-09-07
+updated: 2026-09-07
+tags: [distributed-systems]
+related: []
+sources: []
+---
+
+Raft elects a leader.
+"#;
+
+    #[test]
+    fn initializes_snapshots_and_restores() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let summary = Workspace::init(root.path(), Template::Research)?;
+        assert_eq!(summary.template, "research");
+        assert!(root.path().join(".gitignore").exists());
+        assert!(root.path().join("wiki/index.md").exists());
+        assert!(root.path().join("raw/.gitkeep").exists());
+
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        assert_eq!(workspace.status()?.page_count, 0);
+        assert!(workspace.status()?.dirty_paths.is_empty());
+
+        std::fs::create_dir_all(root.path().join("wiki/entities"))?;
+        std::fs::write(root.path().join("wiki/entities/Raft.md"), PAGE)?;
+        let status = workspace.status()?;
+        assert_eq!(status.page_count, 1);
+        assert_eq!(status.dirty_paths, vec!["wiki/entities/Raft.md"]);
+
+        let first = workspace.snapshot("one source")?;
+        assert_eq!(first.result, "created");
+        std::fs::write(
+            root.path().join("wiki/entities/Vector.md"),
+            PAGE.replace("Raft", "Vector"),
+        )?;
+        let second = workspace.snapshot("two sources")?;
+        assert_eq!(second.result, "created");
+
+        workspace.restore(&first.snapshot_id)?;
+        let status = workspace.status()?;
+        assert_eq!(status.page_count, 1);
+        assert!(!root.path().join("wiki/entities/Vector.md").exists());
+
+        let history = workspace.history(10)?;
+        assert!(history.len() >= 4);
+        Ok(())
+    }
+
+    #[test]
+    fn source_shas_are_deduplicated() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Generic)?;
+        let workspace = Workspace::open(root.path(), Template::Generic)?;
+        let sha = "a".repeat(64);
+        assert!(!workspace.metadata.source_exists_by_sha(&sha)?);
+        workspace.metadata.insert_source(
+            "source_a",
+            "version_a",
+            &sha,
+            "paper.md",
+            128,
+            &rfc3339(datetime!(2026-09-07 12:00 UTC))?,
+        )?;
+        assert!(workspace.metadata.source_exists_by_sha(&sha)?);
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_lock_blocks_concurrent_mutations() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Generic)?;
+        let _guard = WorkspaceLock::acquire(root.path(), "test-one")?;
+        let second = WorkspaceLock::acquire(root.path(), "test-two");
+        assert!(matches!(second, Err(StoreError::Locked { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn init_rejects_nonempty_roots() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("unrelated.txt"), "keep")?;
+        assert!(matches!(
+            Workspace::init(root.path(), Template::Generic),
+            Err(StoreError::RootNotEmpty)
+        ));
+        assert!(root.path().join("unrelated.txt").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn init_rejects_existing_repositories() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir_all(root.path().join(".git"))?;
+        assert!(matches!(
+            Workspace::init(root.path(), Template::Generic),
+            Err(StoreError::Vcs(corpusbot_vcs::VcsError::RepositoryExists))
+        ));
+        Ok(())
+    }
+
+    fn rfc3339(value: time::OffsetDateTime) -> Result<String> {
+        value
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|error| {
+                StoreError::Core(corpusbot_core::CoreError::Frontmatter(error.to_string()))
+            })
+    }
+}
