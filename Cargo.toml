@@ -28,7 +28,11 @@ corpusbot-lint = { path = "crates/corpusbot-lint" }
 corpusbot-agent = { path = "crates/corpusbot-agent" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+git2 = "0.20"
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+walkdir = "2"
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
