@@ -721,6 +721,7 @@ version = "0.1.0"
 dependencies = [
  "corpusbot-agent",
  "corpusbot-core",
+ "corpusbot-lint",
  "corpusbot-search",
  "corpusbot-store",
  "corpusbot-vcs",

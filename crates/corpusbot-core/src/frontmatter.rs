@@ -11,6 +11,7 @@ use crate::template::Template;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Frontmatter {
+    #[serde(rename = "type")]
     page_type: PageType,
     title: String,
     created: IsoDate,

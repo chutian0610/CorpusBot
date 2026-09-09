@@ -22,3 +22,4 @@ walkdir.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+corpusbot-lint.workspace = true

@@ -23,6 +23,56 @@ The Vite dev server listens on <http://127.0.0.1:1420>. Run the desktop shell wi
 pnpm tauri dev
 ```
 
+## MVP workflow
+
+Create a fresh research workspace:
+
+```bash
+cargo run -p corpusbot-cli -- init --root /path/to/research-wiki --template research
+```
+
+Import a Markdown source:
+
+```bash
+cargo run -p corpusbot-cli -- ingest --root /path/to/research-wiki --file ./paper.md
+```
+
+Then inspect health and ask a cited question:
+
+```bash
+cargo run -p corpusbot-cli -- lint --root /path/to/research-wiki --format table
+cargo run -p corpusbot-cli -- query --root /path/to/research-wiki --question "What is Raft?"
+```
+
+Snapshots and restore:
+
+```bash
+cargo run -p corpusbot-cli -- snapshot --root /path/to/research-wiki --message "before edits"
+cargo run -p corpusbot-cli -- history --root /path/to/research-wiki
+cargo run -p corpusbot-cli -- restore --root /path/to/research-wiki --snapshot <snapshot-id> --yes
+```
+
+## LLM configuration
+
+The desktop Settings view writes an OpenAI-compatible configuration to the user-level CorpusBot config directory. The API key is stored privately and is not displayed again.
+
+Environment variables take precedence over the saved settings:
+
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
+- `CORPUSBOT_MODEL`
+
+The MVP uses Chat Completions-compatible endpoints and requires typed JSON responses.
+
+## Current MVP limitations
+
+- Ingest is serial and Markdown-only; PDF/EPUB/HTML import is not implemented.
+- Ingest rebuilds the Tantivy generation rather than performing segment-level incremental updates.
+- Snapshot restore currently reindexes through the next ingest flow; stale-generation reconciliation is minimal.
+- Crash recovery and journal replay are foundational implementations and still need fault-injection hardening.
+- Lint reports issues but does not auto-repair.
+- MCP, graph visualization, clustering, and Deep Research are intentionally post-MVP.
+
 ## Quality checks
 
 ```bash
