@@ -1,15 +1,13 @@
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
-
 use crate::error::Result;
+use rusqlite::{Connection, OptionalExtension};
 
 pub struct Metadata {
     connection: Connection,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PageRow {
     pub path: String,
     pub title: String,
@@ -18,7 +16,7 @@ pub struct PageRow {
     pub updated_at: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SourceRow {
     pub source_id: String,
     pub source_version_id: String,
@@ -69,6 +67,7 @@ impl Metadata {
               baseline_snapshot_id TEXT NOT NULL,
               baseline_manifest_id TEXT NOT NULL,
               touched_resources_json TEXT NOT NULL,
+              request_json TEXT,
               current_backup_dir TEXT,
               created_at TEXT NOT NULL,
               finished_at TEXT
@@ -84,6 +83,7 @@ impl Metadata {
             );
             "#,
         )?;
+        add_column_if_missing(connection, "ingest_runs", "request_json", "TEXT")?;
         Ok(())
     }
 
@@ -259,4 +259,106 @@ impl Metadata {
         let pending = statement.exists([])?;
         Ok(pending)
     }
+
+    pub fn pending_ingest(&self) -> Result<Option<PendingIngestRun>> {
+        self.connection
+            .query_row(
+                "SELECT run_id, baseline_snapshot_id, baseline_manifest_id,
+                        touched_resources_json, request_json, current_backup_dir
+                 FROM ingest_runs
+                 WHERE status = 'applying'
+                 ORDER BY created_at
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok(PendingIngestRun {
+                        run_id: row.get(0)?,
+                        baseline_snapshot_id: row.get(1)?,
+                        baseline_manifest_id: row.get(2)?,
+                        touched_resources_json: row.get(3)?,
+                        request_json: row.get(4)?,
+                        current_backup_dir: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_pending_ingest(
+        &self,
+        run_id: &str,
+        source_id: &str,
+        baseline_snapshot_id: &str,
+        baseline_manifest_id: &str,
+        touched_resources_json: &str,
+        request_json: &str,
+        created_at: &str,
+        current_backup_dir: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO ingest_runs(
+                run_id, source_id, status, baseline_snapshot_id, baseline_manifest_id,
+                touched_resources_json, request_json, current_backup_dir, created_at
+             ) VALUES (?1, ?2, 'applying', ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                run_id,
+                source_id,
+                baseline_snapshot_id,
+                baseline_manifest_id,
+                touched_resources_json,
+                request_json,
+                current_backup_dir,
+                created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_ingest_finished(&self, run_id: &str, status: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE ingest_runs
+             SET status = ?2, finished_at = ?3
+             WHERE run_id = ?1 AND status = 'applying'",
+            rusqlite::params![
+                run_id,
+                status,
+                &time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| "unknown-time".to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingIngestRun {
+    pub run_id: String,
+    pub baseline_snapshot_id: String,
+    pub baseline_manifest_id: String,
+    pub touched_resources_json: String,
+    pub request_json: Option<String>,
+    pub current_backup_dir: Option<String>,
+}
+
+fn add_column_if_missing(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let exists = connection
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(std::result::Result::ok)
+        .any(|name| name == column);
+    if !exists {
+        connection.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
 }

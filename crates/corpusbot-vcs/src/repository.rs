@@ -209,6 +209,25 @@ impl RepositoryHandle {
         Ok(content)
     }
 
+    pub fn commit_id_with_trailer(&self, key: &str, value: &str) -> Result<Option<String>> {
+        let mut revwalk = self.repository.revwalk()?;
+        revwalk.push_head()?;
+        let expected = format!("{key}: {value}");
+        for oid in revwalk {
+            let commit = self.repository.find_commit(oid?)?;
+            let Some(message) = commit.message() else {
+                continue;
+            };
+            let Some((_summary, trailers)) = message.split_once("\n\n") else {
+                continue;
+            };
+            if trailers.lines().any(|line| line.trim() == expected) {
+                return Ok(Some(commit.id().to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     fn commit_tree(
         &self,
         message: &str,

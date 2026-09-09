@@ -12,6 +12,10 @@ pub enum StoreError {
     Locked { owner: String },
     #[error("workspace has pending recovery")]
     RecoveryPending,
+    #[error("workspace tracked content is dirty: {paths:?}")]
+    WorkspaceDirty { paths: Vec<String> },
+    #[error("invalid ingest run id")]
+    InvalidRunId,
     #[error("snapshot {0} was not found")]
     SnapshotNotFound(String),
     #[error(transparent)]

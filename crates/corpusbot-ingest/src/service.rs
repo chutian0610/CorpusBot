@@ -109,7 +109,6 @@ where
         let source_version_id = format!("ver_{}", &sha256[..24]);
         let raw_path = format!("raw/{sha256}/{original_name}");
         let baseline = workspace.revision_manifest()?;
-        workspace.write_raw_source(&raw_path, markdown.as_bytes())?;
         let source_record = corpusbot_core::SourceRecord::new(
             &source_id,
             &source_version_id,
@@ -172,10 +171,7 @@ where
 
         let mut files = BTreeMap::new();
         let mut pages = Vec::new();
-        let mut touched = vec![ResourceRevision::content(
-            ResourceId::new(&raw_path)?,
-            markdown.as_bytes(),
-        )];
+        let mut touched = vec![ResourceRevision::absent(ResourceId::new(&raw_path)?)];
         let mut created = vec![source_page.clone()];
         let mut updated = Vec::new();
         files.insert(source_page.clone(), source_markdown.clone().into_bytes());
@@ -276,8 +272,10 @@ where
             touched,
             baseline_manifest: baseline,
         };
+        workspace.begin_ingest(&request)?;
         let committed = workspace.commit_ingest(&request)?;
-        rebuild_index(workspace)?;
+        workspace.reconcile_pending_ingest()?;
+        workspace.rebuild_search_index()?;
 
         Ok(IngestResult::Committed {
             run_id: committed.run_id,
@@ -674,41 +672,6 @@ fn hex(content: &[u8]) -> String {
     format!("{:x}", Sha256::digest(content))
 }
 
-fn rebuild_index(workspace: &Workspace) -> Result<()> {
-    let lock =
-        corpusbot_store::WorkspaceLock::acquire(&workspace.paths().root, "search-index-rebuild")?;
-    let mut documents = Vec::new();
-    for entry in walkdir::WalkDir::new(workspace.paths().wiki_dir.clone()).sort_by_file_name() {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry
-            .path()
-            .strip_prefix(workspace.paths().root.clone())
-            .map_err(|error| IngestError::Core(corpusbot_core::CoreError::Path(error.to_string())))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        let markdown = std::fs::read_to_string(entry.path())?;
-        if let Ok((document, _)) =
-            WikiDoc::parse_markdown(corpusbot_core::WikiPath::parse(&path)?, &markdown)
-        {
-            documents.push(corpusbot_search::SearchDocument {
-                path,
-                title: document.frontmatter().title().to_owned(),
-                page_type: document.frontmatter().page_type().as_str().to_owned(),
-                tags: document.frontmatter().tags().to_vec(),
-                body: markdown,
-                updated_at: document.frontmatter().updated().to_string(),
-            });
-        }
-    }
-    corpusbot_search::SearchIndex::new(workspace.paths().search_index.clone())
-        .rebuild(&documents)?;
-    drop(lock);
-    Ok(())
-}
-
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
@@ -815,6 +778,31 @@ Raft elects a leader before replicating log entries. A candidate needs a majorit
             Err(IngestError::WorkspaceDirty { .. })
         ));
         std::fs::remove_file(source)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn llm_failure_does_not_mutate_tracked_workspace() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        corpusbot_store::Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        let source = root.path().join("raft.md");
+        std::fs::write(&source, SOURCE)?;
+        let ingestor = Ingestor::new(FakeLlmClient::new(Vec::<String>::new()));
+
+        assert!(matches!(
+            ingestor.ingest_file(&workspace, &source).await,
+            Err(IngestError::Agent(_))
+        ));
+        let raw_file = root
+            .path()
+            .join("raw")
+            .join(hex(SOURCE.as_bytes()))
+            .join("raft.md");
+        assert!(!raw_file.exists());
+        let status = workspace.status()?;
+        assert!(status.dirty_paths.is_empty());
+        assert!(!status.recovery_pending);
         Ok(())
     }
 }
