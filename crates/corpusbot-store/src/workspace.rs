@@ -201,6 +201,7 @@ impl Workspace {
             repository,
             metadata,
         };
+        workspace.reconcile_pending_restore()?;
         workspace.reconcile_pending_ingest()?;
         Ok(workspace)
     }
@@ -325,6 +326,7 @@ impl Workspace {
     }
 
     pub fn begin_ingest(&self, request: &IngestCommitRequest) -> Result<()> {
+        self.reconcile_pending_restore()?;
         self.reconcile_pending_ingest()?;
         validate_run_id(&request.run_id)?;
         let _lock = WorkspaceLock::acquire(&self.paths.root, "ingest-begin")?;
@@ -363,6 +365,7 @@ impl Workspace {
     }
 
     pub fn commit_ingest(&self, request: &IngestCommitRequest) -> Result<IngestCommitResult> {
+        self.reconcile_pending_restore()?;
         self.reconcile_pending_ingest()?;
         let lock = WorkspaceLock::acquire(&self.paths.root, "ingest-commit")?;
         if self.metadata.has_pending_recovery()? {
@@ -455,6 +458,7 @@ impl Workspace {
     }
 
     pub fn snapshot(&self, message: &str) -> Result<SnapshotResult> {
+        self.reconcile_pending_restore()?;
         self.reconcile_pending_ingest()?;
         let lock = WorkspaceLock::acquire(&self.paths.root, "snapshot")?;
         let head_before = self.repository.head_id()?;
@@ -495,23 +499,202 @@ impl Workspace {
     }
 
     pub fn restore(&self, snapshot_id: &str) -> Result<()> {
+        self.reconcile_pending_restore()?;
         self.reconcile_pending_ingest()?;
-        let lock = WorkspaceLock::acquire(&self.paths.root, "restore")?;
-        let selected = self.repository.scoped_content(snapshot_id)?;
-        let pre_restore = self
-            .repository
-            .snapshot_scoped(&format!("pre-restore {snapshot_id}"), &[])?;
-        let updates = selected
-            .iter()
-            .map(|(path, content)| ScopedUpdate::put(path.clone(), content.clone()))
-            .collect::<Vec<_>>();
-        self.repository
-            .commit_scoped(&format!("restore {snapshot_id}"), &updates, &[])?;
-        self.repository.checkout_head()?;
-        drop(lock);
-        self.rebuild_search_index()?;
-        let _ = pre_restore;
+        let run_id = self.prepare_restore(snapshot_id)?;
+        self.activate_restore(&run_id)?;
         Ok(())
+    }
+
+    pub fn reconcile_pending_restore(&self) -> Result<()> {
+        if !self.metadata.has_pending_recovery()? {
+            return Ok(());
+        }
+        let lock = WorkspaceLock::acquire(&self.paths.root, "restore-recovery")?;
+        let Some(run) = self.metadata.pending_restore()? else {
+            return Ok(());
+        };
+        let target_commit = self
+            .repository
+            .commit_id_with_trailer("CorpusBot-Restore-Run", &run.run_id)?;
+
+        let Some(target_commit) = target_commit else {
+            self.metadata
+                .mark_restore_finished(&run.run_id, "aborted")?;
+            drop(lock);
+            self.cleanup_restore_staging(&run.run_id);
+            return Ok(());
+        };
+
+        if self.repository.is_dirty()? {
+            self.repository.snapshot_scoped(
+                &format!("recovery backup for restore {}", run.run_id),
+                &[("CorpusBot-Restore-Backup", run.run_id.as_str())],
+            )?;
+        }
+        let selected = self.repository.scoped_content(&target_commit)?;
+        let updates = scoped_updates(&selected);
+        self.repository.commit_scoped(
+            &format!("complete restore {}", run.target_snapshot_id),
+            &updates,
+            &[("CorpusBot-Restore-Run", run.run_id.as_str())],
+        )?;
+        self.write_scoped_worktree(&selected)?;
+        self.refresh_pages()?;
+        self.rebuild_search_index()?;
+        self.metadata
+            .mark_restore_finished(&run.run_id, "completed")?;
+        drop(lock);
+        self.cleanup_restore_staging(&run.run_id);
+        Ok(())
+    }
+
+    fn prepare_restore(&self, snapshot_id: &str) -> Result<String> {
+        let lock = WorkspaceLock::acquire(&self.paths.root, "restore-prepare")?;
+        if self.metadata.has_pending_recovery()? {
+            return Err(StoreError::RecoveryPending);
+        }
+        if let Some(state) = self.repository.unsafe_state() {
+            return Err(corpusbot_vcs::VcsError::UnsafeState(state).into());
+        }
+
+        let selected = self.repository.scoped_content(snapshot_id)?;
+        let expected_manifest = self.revision_manifest()?;
+        let run_id = format!(
+            "restore_{:x}",
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        );
+        let staging_dir = self.restore_staging_dir(&run_id)?;
+        self.stage_scoped_content(&staging_dir, &selected)?;
+
+        let pre_restore = self.repository.snapshot_scoped(
+            &format!("pre-restore {snapshot_id}"),
+            &[("CorpusBot-Restore-Baseline", run_id.as_str())],
+        )?;
+        self.metadata.insert_pending_restore(
+            &run_id,
+            snapshot_id,
+            &pre_restore.commit_id,
+            expected_manifest.manifest_id(),
+            &rfc3339_now(),
+        )?;
+
+        let current_manifest = self.revision_manifest()?;
+        if current_manifest.manifest_id() != expected_manifest.manifest_id() {
+            self.metadata.mark_restore_finished(&run_id, "conflicted")?;
+            drop(lock);
+            self.cleanup_restore_staging(&run_id);
+            return Err(StoreError::RestoreConflict {
+                expected: expected_manifest.manifest_id().to_owned(),
+                current: current_manifest.manifest_id().to_owned(),
+            });
+        }
+
+        self.metadata.update_restore_phase(&run_id, "switching")?;
+        Ok(run_id)
+    }
+
+    fn activate_restore(&self, run_id: &str) -> Result<()> {
+        let lock = WorkspaceLock::acquire(&self.paths.root, "restore-switch")?;
+        let run = self
+            .metadata
+            .pending_restore()?
+            .filter(|run| run.run_id == run_id)
+            .ok_or(StoreError::RecoveryPending)?;
+        let current_manifest = self.revision_manifest()?;
+        if current_manifest.manifest_id() != run.expected_manifest_id {
+            self.metadata.mark_restore_finished(run_id, "conflicted")?;
+            drop(lock);
+            self.cleanup_restore_staging(run_id);
+            return Err(StoreError::RestoreConflict {
+                expected: run.expected_manifest_id.clone(),
+                current: current_manifest.manifest_id().to_owned(),
+            });
+        }
+
+        let selected = self.repository.scoped_content(&run.target_snapshot_id)?;
+        let updates = scoped_updates(&selected);
+        let committed = self.repository.commit_scoped(
+            &format!("restore {}", run.target_snapshot_id),
+            &updates,
+            &[("CorpusBot-Restore-Run", run.run_id.as_str())],
+        );
+        let target_commit = match committed {
+            Ok(summary) => summary.commit_id,
+            Err(error) => {
+                let Some(commit_id) = self
+                    .repository
+                    .commit_id_with_trailer("CorpusBot-Restore-Run", run_id)?
+                else {
+                    self.metadata.mark_restore_finished(run_id, "failed")?;
+                    drop(lock);
+                    self.cleanup_restore_staging(run_id);
+                    return Err(error.into());
+                };
+                commit_id
+            }
+        };
+        let committed_content = self.repository.scoped_content(&target_commit)?;
+        self.write_scoped_worktree(&committed_content)?;
+        self.refresh_pages()?;
+        self.rebuild_search_index()?;
+        self.metadata.mark_restore_finished(run_id, "completed")?;
+        drop(lock);
+        self.cleanup_restore_staging(run_id);
+        Ok(())
+    }
+
+    fn restore_staging_dir(&self, run_id: &str) -> Result<PathBuf> {
+        validate_run_id(run_id)?;
+        Ok(self
+            .paths
+            .engine_dir
+            .join("restore")
+            .join(run_id)
+            .join("target"))
+    }
+
+    fn stage_scoped_content(
+        &self,
+        staging_dir: &Path,
+        content: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        if staging_dir.exists() {
+            std::fs::remove_dir_all(staging_dir)?;
+        }
+        std::fs::create_dir_all(staging_dir)?;
+        for (path, bytes) in content {
+            validate_scoped_path(path)?;
+            let target = staging_dir.join(path);
+            write_atomic(&target, bytes)?;
+        }
+        Ok(())
+    }
+
+    fn write_scoped_worktree(&self, content: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+        for path in content.keys() {
+            validate_scoped_path(path)?;
+        }
+        for directory in [&self.paths.wiki_dir, &self.paths.raw_dir] {
+            if directory.exists() {
+                std::fs::remove_dir_all(directory)?;
+            }
+            std::fs::create_dir_all(directory)?;
+        }
+        for (path, bytes) in content {
+            write_atomic(&self.paths.root.join(path), bytes)?;
+        }
+        Ok(())
+    }
+
+    fn cleanup_restore_staging(&self, run_id: &str) {
+        if let Ok(directory) = self.restore_staging_dir(run_id) {
+            let _ = std::fs::remove_dir_all(
+                directory
+                    .parent()
+                    .map_or_else(|| directory.clone(), Path::to_path_buf),
+            );
+        }
     }
 
     pub fn reconcile_pending_ingest(&self) -> Result<()> {
@@ -679,6 +862,35 @@ fn rfc3339_now() -> String {
         .unwrap_or_else(|_| "unknown-time".to_owned())
 }
 
+fn scoped_updates(content: &BTreeMap<String, Vec<u8>>) -> Vec<ScopedUpdate> {
+    content
+        .iter()
+        .map(|(path, bytes)| ScopedUpdate::put(path.clone(), bytes.clone()))
+        .collect()
+}
+
+fn validate_scoped_path(path: &str) -> Result<()> {
+    ResourceId::new(path)?;
+    if path != ".gitignore" && !path.starts_with("wiki/") && !path.starts_with("raw/") {
+        return Err(StoreError::Core(corpusbot_core::CoreError::Path(
+            path.to_owned(),
+        )));
+    }
+    Ok(())
+}
+
+fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().ok_or_else(|| {
+        StoreError::Core(corpusbot_core::CoreError::Path(path.display().to_string()))
+    })?)?;
+    std::io::Write::write_all(&mut file, content)?;
+    file.persist(path)?;
+    Ok(())
+}
+
 pub fn capture_revision_manifest(root: &Path, head_snapshot_id: &str) -> Result<RevisionManifest> {
     let mut resources = Vec::new();
     for directory in ["wiki", "raw"] {
@@ -782,6 +994,115 @@ Raft elects a leader.
 
         let history = workspace.history(10)?;
         assert!(history.len() >= 4);
+        Ok(())
+    }
+
+    #[test]
+    fn restore_conflict_preserves_changes_after_capture() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        std::fs::create_dir_all(root.path().join("wiki/entities"))?;
+        std::fs::write(root.path().join("wiki/entities/Raft.md"), PAGE)?;
+        let first = workspace.snapshot("first")?;
+        std::fs::write(
+            root.path().join("wiki/entities/Vector.md"),
+            PAGE.replace("Raft", "Vector"),
+        )?;
+        workspace.snapshot("second")?;
+
+        let run_id = workspace.prepare_restore(&first.snapshot_id)?;
+        std::fs::write(
+            root.path().join("wiki/entities/Raft.md"),
+            PAGE.replace("Raft elects", "The user changed how Raft elects"),
+        )?;
+
+        assert!(matches!(
+            workspace.activate_restore(&run_id),
+            Err(StoreError::RestoreConflict { .. })
+        ));
+        let status = workspace.status()?;
+        assert!(!status.recovery_pending);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("wiki/entities/Raft.md"))?,
+            PAGE.replace("Raft elects", "The user changed how Raft elects")
+        );
+        assert!(root.path().join("wiki/entities/Vector.md").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn open_aborts_a_restore_prepared_before_git_switch() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        std::fs::create_dir_all(root.path().join("wiki/entities"))?;
+        std::fs::write(root.path().join("wiki/entities/Raft.md"), PAGE)?;
+        let first = workspace.snapshot("first")?;
+        std::fs::write(
+            root.path().join("wiki/entities/Vector.md"),
+            PAGE.replace("Raft", "Vector"),
+        )?;
+        workspace.snapshot("second")?;
+        std::fs::write(root.path().join("unrelated.txt"), "keep")?;
+
+        let run_id = workspace.prepare_restore(&first.snapshot_id)?;
+        assert!(workspace.status()?.recovery_pending);
+        let reopened = Workspace::open(root.path(), Template::Research)?;
+        let status = reopened.status()?;
+
+        assert!(!status.recovery_pending);
+        assert!(status.dirty_paths.is_empty());
+        assert!(root.path().join("wiki/entities/Vector.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("unrelated.txt"))?,
+            "keep"
+        );
+        assert!(!root.path().join(".wiki-db/restore").join(&run_id).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn open_completes_a_restore_that_crashed_after_git_switch() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        std::fs::create_dir_all(root.path().join("wiki/entities"))?;
+        std::fs::write(root.path().join("wiki/entities/Raft.md"), PAGE)?;
+        let first = workspace.snapshot("first")?;
+        std::fs::write(
+            root.path().join("wiki/entities/Vector.md"),
+            PAGE.replace("Raft", "Vector"),
+        )?;
+        workspace.snapshot("second")?;
+        std::fs::write(root.path().join("unrelated.txt"), "keep")?;
+
+        let run_id = workspace.prepare_restore(&first.snapshot_id)?;
+        let selected = workspace.repository.scoped_content(&first.snapshot_id)?;
+        workspace.repository.commit_scoped(
+            "interrupted restore",
+            &scoped_updates(&selected),
+            &[("CorpusBot-Restore-Run", run_id.as_str())],
+        )?;
+        std::fs::write(
+            root.path().join("wiki/entities/Raft.md"),
+            "partially restored",
+        )?;
+        assert!(workspace.status()?.recovery_pending);
+
+        let reopened = Workspace::open(root.path(), Template::Research)?;
+        let status = reopened.status()?;
+        assert!(!status.recovery_pending);
+        assert!(status.dirty_paths.is_empty());
+        assert_eq!(reopened.read_page("wiki/entities/Raft.md")?, PAGE);
+        assert!(!root.path().join("wiki/entities/Vector.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("unrelated.txt"))?,
+            "keep"
+        );
+        reopened.rebuild_search_index()?;
+        let hits = SearchIndex::new(root.path().join(".wiki-db/tantivy")).search("Raft", 8)?;
+        assert_eq!(hits[0].path, "wiki/entities/Raft.md");
         Ok(())
     }
 

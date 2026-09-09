@@ -16,6 +16,10 @@ pub enum StoreError {
     WorkspaceDirty { paths: Vec<String> },
     #[error("invalid ingest run id")]
     InvalidRunId,
+    #[error(
+        "restore conflict: workspace changed after capture (expected {expected}, current {current})"
+    )]
+    RestoreConflict { expected: String, current: String },
     #[error("snapshot {0} was not found")]
     SnapshotNotFound(String),
     #[error(transparent)]

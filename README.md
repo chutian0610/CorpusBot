@@ -69,7 +69,7 @@ The MVP uses Chat Completions-compatible endpoints and requires typed JSON respo
 - Ingest is serial and Markdown-only; PDF/EPUB/HTML import is not implemented.
 - Ingest rebuilds the Tantivy generation rather than performing segment-level incremental updates.
 - Snapshot restore immediately rebuilds the Tantivy generation rather than performing segment-level incremental updates.
-- Interrupted Ingest runs reconcile automatically on the next open. Restore journaling and fault-injection hardening remain incomplete.
+- Interrupted Ingest and Restore runs reconcile automatically on the next open; broader fault-injection hardening remains future work.
 - Lint reports issues but does not auto-repair.
 - MCP, graph visualization, clustering, and Deep Research are intentionally post-MVP.
 
