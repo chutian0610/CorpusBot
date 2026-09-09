@@ -7,8 +7,8 @@ pub use error::{Result, StoreError};
 pub use lock::{LockOwner, WorkspaceLock};
 pub use metadata::{Metadata, PageRow, SourceRow};
 pub use workspace::{
-    IngestCommitRequest, IngestCommitResult, PageFile, SnapshotResult, SnapshotRow, Workspace,
-    WorkspacePaths, WorkspaceStatus, WorkspaceSummary,
+    GitIdentity, IngestCommitRequest, IngestCommitResult, PageFile, SnapshotResult, SnapshotRow,
+    Workspace, WorkspacePaths, WorkspaceStatus, WorkspaceSummary,
 };
 
 #[cfg(test)]

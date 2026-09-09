@@ -80,3 +80,11 @@ make check
 ```
 
 This runs Rust formatting and Clippy, Rust and frontend tests, the TypeScript check, and the production frontend build. `make fmt` formats both Rust and frontend sources.
+
+Continuous Integration runs the same checks on every pull request. To validate an OpenAI-compatible endpoint end to end, run:
+
+```bash
+OPENAI_API_KEY=... scripts/llm-smoke.sh
+```
+
+The smoke script creates a temporary workspace, ingests the sample source, runs lint, and asks a real question. Override `SOURCE_FILE`, `QUESTION`, or `WORKSPACE` to exercise your own material. Set `KEEP_WORKSPACE=1` to retain the workspace and print its path for debugging.

@@ -768,6 +768,7 @@ name = "corpusbot-store"
 version = "0.1.0"
 dependencies = [
  "corpusbot-core",
+ "corpusbot-search",
  "corpusbot-vcs",
  "rusqlite",
  "serde",

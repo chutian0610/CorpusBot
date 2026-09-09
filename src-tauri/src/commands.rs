@@ -3,11 +3,13 @@
 use std::path::{Path, PathBuf};
 
 use corpusbot_agent::{
-    QueryContextPage, RigLlmClient, SettingsInput, SettingsSummary, SourceAgent, provider_config,
+    QueryContextPage, RigLlmClient, SettingsInput, SettingsSummary, SourceAgent, git_identity,
+    provider_config,
 };
 use corpusbot_core::{Revision, Template, WikiDoc, Wikilink};
 use corpusbot_ingest::Ingestor;
 use corpusbot_search::SearchIndex;
+use corpusbot_store::GitIdentity;
 use corpusbot_store::Workspace;
 use serde::Serialize;
 
@@ -38,7 +40,9 @@ fn template_from_name(value: &str) -> Result<Template, CommandError> {
 }
 
 fn workspace(root: &Path) -> Result<Workspace, CommandError> {
-    Workspace::open(root, Template::default_template())
+    let identity = git_identity().map_err(|error| CommandError(error.to_string()))?;
+    let identity = identity.map(|(name, email)| GitIdentity { name, email });
+    Workspace::open_with_identity(root, Template::default_template(), identity)
         .map_err(|error| CommandError(error.to_string()))
 }
 
@@ -122,7 +126,9 @@ pub fn init_workspace(
     root: PathBuf,
     template: String,
 ) -> Result<corpusbot_store::WorkspaceSummary, CommandError> {
-    Workspace::init(&root, template_from_name(&template)?)
+    let identity = git_identity().map_err(|error| CommandError(error.to_string()))?;
+    let identity = identity.map(|(name, email)| GitIdentity { name, email });
+    Workspace::init_with_identity(&root, template_from_name(&template)?, identity)
         .map_err(|error| CommandError(error.to_string()))
 }
 

@@ -7,6 +7,7 @@ pub mod workflow;
 
 pub use audit::{AuditSink, FileAuditSink, WorkflowAuditEvent};
 pub use config::ProviderConfig;
+pub use config::git_identity;
 pub use config::{SettingsInput, SettingsSummary, load_settings, provider_config, save_settings};
 pub use error::{AgentError, Result};
 pub use llm::{FakeLlmClient, LlmClient, LlmRequest, LlmResponse, RigLlmClient};
