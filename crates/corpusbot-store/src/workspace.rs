@@ -78,7 +78,7 @@ pub struct SnapshotRow {
     pub created_at: i64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct PageFile {
     pub path: String,
     pub markdown: String,
@@ -87,7 +87,7 @@ pub struct PageFile {
     pub updated_at: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct IngestCommitRequest {
     pub run_id: String,
     pub message: String,
@@ -195,12 +195,14 @@ impl Workspace {
             .find(|candidate| candidate.as_str() == stored_template)
             .unwrap_or(template);
 
-        Ok(Self {
+        let workspace = Self {
             paths,
             template,
             repository,
             metadata,
-        })
+        };
+        workspace.reconcile_pending_ingest()?;
+        Ok(workspace)
     }
 
     pub fn paths(&self) -> &WorkspacePaths {
@@ -322,7 +324,46 @@ impl Workspace {
         Ok(())
     }
 
+    pub fn begin_ingest(&self, request: &IngestCommitRequest) -> Result<()> {
+        self.reconcile_pending_ingest()?;
+        validate_run_id(&request.run_id)?;
+        let _lock = WorkspaceLock::acquire(&self.paths.root, "ingest-begin")?;
+        if self.metadata.has_pending_recovery()? {
+            return Err(StoreError::RecoveryPending);
+        }
+        if let Some(state) = self.repository.unsafe_state() {
+            return Err(corpusbot_vcs::VcsError::UnsafeState(state).into());
+        }
+        if self.repository.is_dirty()? {
+            return Err(StoreError::WorkspaceDirty {
+                paths: self.repository.dirty_paths()?,
+            });
+        }
+
+        let backup_dir = self.recovery_backup_dir(&request.run_id)?;
+        self.backup_touched_paths(request, &backup_dir)?;
+        let relative_backup_dir = backup_dir
+            .strip_prefix(&self.paths.root)
+            .map_err(|error| StoreError::Core(corpusbot_core::CoreError::Path(error.to_string())))?
+            .to_string_lossy();
+        self.metadata.insert_pending_ingest(
+            &request.run_id,
+            request
+                .source
+                .as_ref()
+                .map_or("", |source| source.source_id.as_str()),
+            request.baseline_manifest.head_snapshot_id(),
+            request.baseline_manifest.manifest_id(),
+            &serde_json::to_string(&request.touched)?,
+            &serde_json::to_string(request)?,
+            &rfc3339_now(),
+            &relative_backup_dir,
+        )?;
+        Ok(())
+    }
+
     pub fn commit_ingest(&self, request: &IngestCommitRequest) -> Result<IngestCommitResult> {
+        self.reconcile_pending_ingest()?;
         let lock = WorkspaceLock::acquire(&self.paths.root, "ingest-commit")?;
         if self.metadata.has_pending_recovery()? {
             return Err(StoreError::RecoveryPending);
@@ -396,6 +437,9 @@ impl Workspace {
                     }
                     std::fs::write(full, content)?;
                 }
+                self.restore_baseline_touched(request)?;
+                self.metadata
+                    .mark_ingest_finished(&request.run_id, "failed")?;
                 return Err(error.into());
             }
         };
@@ -411,6 +455,7 @@ impl Workspace {
     }
 
     pub fn snapshot(&self, message: &str) -> Result<SnapshotResult> {
+        self.reconcile_pending_ingest()?;
         let lock = WorkspaceLock::acquire(&self.paths.root, "snapshot")?;
         let head_before = self.repository.head_id()?;
         if !self.repository.is_dirty()? {
@@ -450,6 +495,7 @@ impl Workspace {
     }
 
     pub fn restore(&self, snapshot_id: &str) -> Result<()> {
+        self.reconcile_pending_ingest()?;
         let lock = WorkspaceLock::acquire(&self.paths.root, "restore")?;
         let selected = self.repository.scoped_content(snapshot_id)?;
         let pre_restore = self
@@ -465,6 +511,125 @@ impl Workspace {
         drop(lock);
         self.rebuild_search_index()?;
         let _ = pre_restore;
+        Ok(())
+    }
+
+    pub fn reconcile_pending_ingest(&self) -> Result<()> {
+        if !self.metadata.has_pending_recovery()? {
+            return Ok(());
+        };
+        let lock = WorkspaceLock::acquire(&self.paths.root, "ingest-recovery")?;
+        let Some(run) = self.metadata.pending_ingest()? else {
+            return Ok(());
+        };
+        let request = run
+            .request_json
+            .as_deref()
+            .ok_or(StoreError::RecoveryPending)?;
+        let request: IngestCommitRequest = serde_json::from_str(request)?;
+        let run_commit = self
+            .repository
+            .commit_id_with_trailer("CorpusBot-Run", &run.run_id)?;
+
+        if run_commit.is_some() {
+            let transaction = self.metadata.unchecked_transaction()?;
+            if let Some(source) = &request.source {
+                crate::metadata::Metadata::insert_source_tx(&transaction, source)?;
+            }
+            for page in &request.pages {
+                crate::metadata::Metadata::upsert_page_tx(
+                    &transaction,
+                    &crate::metadata::PageRow {
+                        path: page.path.clone(),
+                        title: page.title.clone(),
+                        page_type: page.page_type.clone(),
+                        sha256: hex(page.markdown.as_bytes()),
+                        updated_at: page.updated_at.clone(),
+                    },
+                )?;
+            }
+            transaction.commit()?;
+        } else {
+            self.restore_baseline_touched(&request)?;
+        }
+
+        self.rebuild_search_index()?;
+        self.metadata.mark_ingest_finished(
+            &run.run_id,
+            if run_commit.is_some() {
+                "committed"
+            } else {
+                "recovered"
+            },
+        )?;
+        drop(lock);
+        if run_commit.is_none() {
+            let Some(relative) = run.current_backup_dir.as_deref() else {
+                return Ok(());
+            };
+            let backup_root = Path::new(relative).parent().map_or_else(
+                || self.paths.root.join(relative),
+                |parent| self.paths.root.join(parent),
+            );
+            let _ = std::fs::remove_dir_all(backup_root);
+        }
+        Ok(())
+    }
+
+    pub fn rebuild_search_index(&self) -> Result<()> {
+        let documents = self.search_documents()?;
+        SearchIndex::new(self.paths.search_index.clone()).rebuild(&documents)?;
+        Ok(())
+    }
+
+    fn recovery_backup_dir(&self, run_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .paths
+            .engine_dir
+            .join("recovery")
+            .join(run_id)
+            .join("current"))
+    }
+
+    fn backup_touched_paths(&self, request: &IngestCommitRequest, backup_dir: &Path) -> Result<()> {
+        if backup_dir.exists() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(backup_dir)?;
+        for touched in &request.touched {
+            let path = touched.resource().path();
+            let full = self.paths.root.join(path);
+            if full.is_file() {
+                std::fs::create_dir_all(backup_dir.join(path).parent().ok_or_else(|| {
+                    StoreError::Core(corpusbot_core::CoreError::Path(path.to_owned()))
+                })?)?;
+                std::fs::copy(full, backup_dir.join(path))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_baseline_touched(&self, request: &IngestCommitRequest) -> Result<()> {
+        let baseline = self
+            .repository
+            .scoped_content(request.baseline_manifest.head_snapshot_id())?;
+        for touched in &request.touched {
+            let path = touched.resource().path();
+            let full = self.paths.root.join(path);
+            if let Some(content) = baseline.get(path) {
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut file =
+                    tempfile::NamedTempFile::new_in(full.parent().ok_or_else(|| {
+                        StoreError::Core(corpusbot_core::CoreError::Path(path.to_owned()))
+                    })?)?;
+                std::io::Write::write_all(&mut file, content)?;
+                file.persist(&full)?;
+            } else if full.is_file() {
+                std::fs::remove_file(&full)?;
+            }
+        }
         Ok(())
     }
 
@@ -499,12 +664,19 @@ impl Workspace {
         }
         Ok(documents)
     }
+}
 
-    fn rebuild_search_index(&self) -> Result<()> {
-        let documents = self.search_documents()?;
-        SearchIndex::new(self.paths.search_index.clone()).rebuild(&documents)?;
-        Ok(())
+fn validate_run_id(run_id: &str) -> Result<()> {
+    if run_id.is_empty() || run_id.contains(['/', '\\', '\0']) || matches!(run_id, "." | "..") {
+        return Err(StoreError::InvalidRunId);
     }
+    Ok(())
+}
+
+fn rfc3339_now() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown-time".to_owned())
 }
 
 pub fn capture_revision_manifest(root: &Path, head_snapshot_id: &str) -> Result<RevisionManifest> {
@@ -633,6 +805,73 @@ Raft elects a leader.
     }
 
     #[test]
+    fn open_recovers_pending_apply_without_a_run_commit() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        let baseline = workspace.revision_manifest()?;
+        let path = "wiki/entities/Interrupted.md";
+        let request = test_request("interrupted-run", path, baseline, None);
+
+        workspace.begin_ingest(&request)?;
+        std::fs::create_dir_all(root.path().join("wiki/entities"))?;
+        std::fs::write(root.path().join(path), PAGE)?;
+        assert!(workspace.status()?.recovery_pending);
+
+        let reopened = Workspace::open(root.path(), Template::Research)?;
+        let status = reopened.status()?;
+        assert!(!status.recovery_pending);
+        assert!(status.dirty_paths.is_empty());
+        assert!(!root.path().join(path).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn open_reconciles_a_commit_that_reached_git_before_sqlite() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        let baseline = workspace.revision_manifest()?;
+        let path = "wiki/entities/Reconciled.md";
+        let source = crate::SourceRow {
+            source_id: "source_reconcile".to_owned(),
+            source_version_id: "version_reconcile".to_owned(),
+            sha256: "f".repeat(64),
+            original_name: "reconcile.md".to_owned(),
+            size: 128,
+            imported_at: rfc3339(time::OffsetDateTime::UNIX_EPOCH)?,
+        };
+        let request = test_request("reconciled-run", path, baseline, Some(source.clone()));
+
+        workspace.begin_ingest(&request)?;
+        std::fs::create_dir_all(root.path().join("wiki/entities"))?;
+        std::fs::write(root.path().join(path), PAGE)?;
+        let repository = corpusbot_vcs::RepositoryHandle::open(root.path())?;
+        let updates = repository.scoped_updates()?;
+        repository.commit_scoped(
+            "ingest Reconciled",
+            &updates,
+            &[("CorpusBot-Run", request.run_id.as_str())],
+        )?;
+        assert!(workspace.status()?.recovery_pending);
+
+        let reopened = Workspace::open(root.path(), Template::Research)?;
+        let status = reopened.status()?;
+        assert!(!status.recovery_pending);
+        assert!(status.dirty_paths.is_empty());
+        let stored = reopened
+            .metadata
+            .source_by_sha(&source.sha256)?
+            .expect("reconciled source is retained");
+        assert_eq!(stored.source_id, source.source_id);
+        assert!(reopened.pages()?.iter().any(|page| page.path == path));
+        reopened.rebuild_search_index()?;
+        let hits = SearchIndex::new(root.path().join(".wiki-db/tantivy")).search("Raft", 8)?;
+        assert_eq!(hits[0].path, path);
+        Ok(())
+    }
+
+    #[test]
     fn workspace_lock_blocks_concurrent_mutations() -> Result<()> {
         let root = tempfile::tempdir()?;
         Workspace::init(root.path(), Template::Generic)?;
@@ -671,5 +910,30 @@ Raft elects a leader.
             .map_err(|error| {
                 StoreError::Core(corpusbot_core::CoreError::Frontmatter(error.to_string()))
             })
+    }
+
+    fn test_request(
+        run_id: &str,
+        path: &str,
+        baseline: RevisionManifest,
+        source: Option<crate::SourceRow>,
+    ) -> IngestCommitRequest {
+        IngestCommitRequest {
+            run_id: run_id.to_owned(),
+            message: "test ingest".to_owned(),
+            source,
+            files: vec![(path.to_owned(), PAGE.as_bytes().to_vec())],
+            pages: vec![PageFile {
+                path: path.to_owned(),
+                markdown: PAGE.to_owned(),
+                title: "Interrupted".to_owned(),
+                page_type: "entity".to_owned(),
+                updated_at: "2026-09-09".to_owned(),
+            }],
+            touched: vec![ResourceRevision::absent(
+                ResourceId::new(path).expect("valid path"),
+            )],
+            baseline_manifest: baseline,
+        }
     }
 }
