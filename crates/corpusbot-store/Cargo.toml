@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 corpusbot-core.workspace = true
+corpusbot-search.workspace = true
 rusqlite.workspace = true
 corpusbot-vcs.workspace = true
 serde.workspace = true

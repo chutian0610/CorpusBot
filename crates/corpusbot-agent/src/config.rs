@@ -61,6 +61,22 @@ pub fn load_settings() -> Result<SettingsSummary> {
     })
 }
 
+pub fn git_identity() -> Result<Option<(String, String)>> {
+    let settings = load_settings()?;
+    if settings.git_author_name.is_none() && settings.git_author_email.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some((
+        settings
+            .git_author_name
+            .unwrap_or_else(|| "CorpusBot".to_owned()),
+        settings
+            .git_author_email
+            .unwrap_or_else(|| "corpusbot@local.invalid".to_owned()),
+    )))
+}
+
 pub fn save_settings(input: SettingsInput) -> Result<SettingsSummary> {
     let path = settings_path()?;
     if let Some(parent) = path.parent() {

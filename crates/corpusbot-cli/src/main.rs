@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
-use corpusbot_agent::{ProviderConfig, QueryContextPage, RigLlmClient, SourceAgent};
+use corpusbot_agent::{QueryContextPage, RigLlmClient, SourceAgent, provider_config};
 use corpusbot_core::{Template, VERSION};
 use corpusbot_ingest::Ingestor;
 use corpusbot_lint::engine::run_lint;
 use corpusbot_search::SearchIndex;
-use corpusbot_store::Workspace;
+use corpusbot_store::{GitIdentity, Workspace};
 use serde_json::json;
 
 #[derive(Debug, Parser)]
@@ -88,17 +88,25 @@ fn parse_template(value: &str) -> anyhow::Result<Template> {
     }
 }
 
+fn workspace(root: &std::path::Path) -> anyhow::Result<Workspace> {
+    let identity = corpusbot_agent::git_identity()?;
+    let identity = identity.map(|(name, email)| GitIdentity { name, email });
+    Workspace::open_with_identity(root, Template::default_template(), identity).map_err(Into::into)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { root, template } => {
             let template = parse_template(&template)?;
-            let summary = Workspace::init(&root, template)?;
+            let identity = corpusbot_agent::git_identity()?;
+            let identity = identity.map(|(name, email)| GitIdentity { name, email });
+            let summary = Workspace::init_with_identity(&root, template, identity)?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Command::Status { root } => {
-            let workspace = Workspace::open(&root, Template::default_template())?;
+            let workspace = workspace(&root)?;
             let status = workspace.status()?;
             println!(
                 "{}",
@@ -114,12 +122,12 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Command::Snapshot { root, message } => {
-            let workspace = Workspace::open(&root, Template::default_template())?;
+            let workspace = workspace(&root)?;
             let snapshot = workspace.snapshot(&message)?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         }
         Command::History { root, limit } => {
-            let workspace = Workspace::open(&root, Template::default_template())?;
+            let workspace = workspace(&root)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&workspace.history(limit)?)?
@@ -133,13 +141,13 @@ async fn main() -> anyhow::Result<()> {
             if !yes {
                 anyhow::bail!("restore requires --yes");
             }
-            let workspace = Workspace::open(&root, Template::default_template())?;
+            let workspace = workspace(&root)?;
             workspace.restore(&snapshot)?;
             println!("restored to {snapshot}");
         }
         Command::Ingest { root, file } => {
-            let workspace = Workspace::open(&root, Template::default_template())?;
-            let client = RigLlmClient::new(ProviderConfig::load()?)?;
+            let workspace = workspace(&root)?;
+            let client = RigLlmClient::new(provider_config()?)?;
             let result = Ingestor::new(client).ingest_file(&workspace, &file).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -148,13 +156,13 @@ async fn main() -> anyhow::Result<()> {
             question,
             limit,
         } => {
-            let workspace = Workspace::open(&root, Template::default_template())?;
+            let workspace = workspace(&root)?;
             if workspace.status()?.recovery_pending {
                 anyhow::bail!("workspace has pending recovery");
             }
             let manifest = workspace.revision_manifest()?;
             let index = SearchIndex::new(workspace.paths().search_index.clone());
-            let client = RigLlmClient::new(ProviderConfig::load()?)?;
+            let client = RigLlmClient::new(provider_config()?)?;
             let agent = SourceAgent::new(client);
 
             let context = index
@@ -193,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&answer)?);
         }
         Command::Lint { root, format } => {
-            let workspace = Workspace::open(&root, Template::default_template())?;
+            let workspace = workspace(&root)?;
             if workspace.status()?.recovery_pending {
                 anyhow::bail!("workspace has pending recovery");
             }

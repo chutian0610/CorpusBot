@@ -79,6 +79,13 @@ impl RepositoryHandle {
         })
     }
 
+    pub fn set_identity(&self, name: &str, email: &str) -> Result<()> {
+        let mut config = self.repository.config()?;
+        config.set_str("user.name", name)?;
+        config.set_str("user.email", email)?;
+        Ok(())
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

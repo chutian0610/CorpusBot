@@ -19,6 +19,8 @@ pub enum StoreError {
     #[error(transparent)]
     Vcs(#[from] corpusbot_vcs::VcsError),
     #[error(transparent)]
+    Search(#[from] corpusbot_search::SearchError),
+    #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     WalkDir(#[from] walkdir::Error),

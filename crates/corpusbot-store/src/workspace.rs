@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use corpusbot_core::{ResourceId, ResourceRevision, RevisionManifest, Template, WikiDoc};
+use corpusbot_search::{SearchDocument, SearchIndex};
 use corpusbot_vcs::ScopedUpdate;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -104,6 +105,12 @@ pub struct IngestCommitResult {
     pub manifest_id: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct GitIdentity {
+    pub name: String,
+    pub email: String,
+}
+
 pub struct Workspace {
     paths: WorkspacePaths,
     template: Template,
@@ -113,6 +120,14 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn init(root: impl AsRef<Path>, template: Template) -> Result<WorkspaceSummary> {
+        Self::init_with_identity(root, template, None)
+    }
+
+    pub fn init_with_identity(
+        root: impl AsRef<Path>,
+        template: Template,
+        identity: Option<GitIdentity>,
+    ) -> Result<WorkspaceSummary> {
         let root = root.as_ref();
         if root.join(".git").exists() {
             return Err(corpusbot_vcs::VcsError::RepositoryExists.into());
@@ -126,6 +141,9 @@ impl Workspace {
 
         std::fs::create_dir_all(root)?;
         let repository = corpusbot_vcs::RepositoryHandle::init(root)?;
+        if let Some(identity) = identity {
+            repository.set_identity(&identity.name, &identity.email)?;
+        }
         let paths = WorkspacePaths::new(root);
         std::fs::create_dir_all(&paths.wiki_dir)?;
         std::fs::create_dir_all(&paths.raw_dir)?;
@@ -155,8 +173,19 @@ impl Workspace {
     }
 
     pub fn open(root: impl AsRef<Path>, template: Template) -> Result<Self> {
+        Self::open_with_identity(root, template, None)
+    }
+
+    pub fn open_with_identity(
+        root: impl AsRef<Path>,
+        template: Template,
+        identity: Option<GitIdentity>,
+    ) -> Result<Self> {
         let paths = WorkspacePaths::new(root.as_ref());
         let repository = corpusbot_vcs::RepositoryHandle::open(&paths.root)?;
+        if let Some(identity) = identity {
+            repository.set_identity(&identity.name, &identity.email)?;
+        }
         let metadata = Metadata::open(&paths.database)?;
         let stored_template = metadata
             .get_meta("template")?
@@ -434,7 +463,46 @@ impl Workspace {
             .commit_scoped(&format!("restore {snapshot_id}"), &updates, &[])?;
         self.repository.checkout_head()?;
         drop(lock);
+        self.rebuild_search_index()?;
         let _ = pre_restore;
+        Ok(())
+    }
+
+    fn search_documents(&self) -> Result<Vec<SearchDocument>> {
+        let mut documents = Vec::new();
+        for entry in WalkDir::new(&self.paths.wiki_dir).sort_by_file_name() {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry
+                .path()
+                .strip_prefix(&self.paths.root)
+                .map_err(|error| {
+                    StoreError::Core(corpusbot_core::CoreError::Path(error.to_string()))
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let markdown = std::fs::read_to_string(entry.path())?;
+            if let Ok((document, _)) =
+                WikiDoc::parse_markdown(corpusbot_core::WikiPath::parse(&path)?, &markdown)
+            {
+                documents.push(SearchDocument {
+                    path,
+                    title: document.frontmatter().title().to_owned(),
+                    page_type: document.frontmatter().page_type().as_str().to_owned(),
+                    tags: document.frontmatter().tags().to_vec(),
+                    body: markdown,
+                    updated_at: document.frontmatter().updated().to_string(),
+                });
+            }
+        }
+        Ok(documents)
+    }
+
+    fn rebuild_search_index(&self) -> Result<()> {
+        let documents = self.search_documents()?;
+        SearchIndex::new(self.paths.search_index.clone()).rebuild(&documents)?;
         Ok(())
     }
 }
@@ -534,6 +602,11 @@ Raft elects a leader.
         let status = workspace.status()?;
         assert_eq!(status.page_count, 1);
         assert!(!root.path().join("wiki/entities/Vector.md").exists());
+        let index = SearchIndex::new(root.path().join(".wiki-db/tantivy"));
+        let hits = index.search("Raft", 8)?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "wiki/entities/Raft.md");
+        assert!(index.search("Vector", 8)?.is_empty());
 
         let history = workspace.history(10)?;
         assert!(history.len() >= 4);
