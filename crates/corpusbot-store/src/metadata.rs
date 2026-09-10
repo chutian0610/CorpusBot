@@ -77,6 +77,7 @@ impl Metadata {
               run_id TEXT PRIMARY KEY,
               target_snapshot_id TEXT NOT NULL,
               pre_restore_snapshot_id TEXT NOT NULL,
+              expected_manifest_id TEXT NOT NULL,
               phase TEXT NOT NULL,
               created_at TEXT NOT NULL,
               finished_at TEXT
@@ -84,6 +85,12 @@ impl Metadata {
             "#,
         )?;
         add_column_if_missing(connection, "ingest_runs", "request_json", "TEXT")?;
+        add_column_if_missing(
+            connection,
+            "restore_runs",
+            "expected_manifest_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
         Ok(())
     }
 
@@ -253,11 +260,7 @@ impl Metadata {
     }
 
     pub fn has_pending_recovery(&self) -> Result<bool> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT 1 FROM ingest_runs WHERE status = 'applying' LIMIT 1")?;
-        let pending = statement.exists([])?;
-        Ok(pending)
+        Ok(self.pending_ingest()?.is_some() || self.pending_restore()?.is_some())
     }
 
     pub fn pending_ingest(&self) -> Result<Option<PendingIngestRun>> {
@@ -331,6 +334,78 @@ impl Metadata {
         )?;
         Ok(())
     }
+
+    pub fn pending_restore(&self) -> Result<Option<PendingRestoreRun>> {
+        self.connection
+            .query_row(
+                "SELECT run_id, target_snapshot_id, pre_restore_snapshot_id,
+                        expected_manifest_id, phase
+                 FROM restore_runs
+                 WHERE phase IN ('prepared', 'switching')
+                 ORDER BY created_at
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok(PendingRestoreRun {
+                        run_id: row.get(0)?,
+                        target_snapshot_id: row.get(1)?,
+                        pre_restore_snapshot_id: row.get(2)?,
+                        expected_manifest_id: row.get(3)?,
+                        phase: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn insert_pending_restore(
+        &self,
+        run_id: &str,
+        target_snapshot_id: &str,
+        pre_restore_snapshot_id: &str,
+        expected_manifest_id: &str,
+        created_at: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO restore_runs(
+                run_id, target_snapshot_id, pre_restore_snapshot_id,
+                expected_manifest_id, phase, created_at
+             ) VALUES (?1, ?2, ?3, ?4, 'prepared', ?5)",
+            rusqlite::params![
+                run_id,
+                target_snapshot_id,
+                pre_restore_snapshot_id,
+                expected_manifest_id,
+                created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_restore_phase(&self, run_id: &str, phase: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE restore_runs SET phase = ?2 WHERE run_id = ?1",
+            rusqlite::params![run_id, phase],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_restore_finished(&self, run_id: &str, phase: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE restore_runs
+             SET phase = ?2, finished_at = ?3
+             WHERE run_id = ?1 AND phase IN ('prepared', 'switching')",
+            rusqlite::params![
+                run_id,
+                phase,
+                time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| "unknown-time".to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -341,6 +416,15 @@ pub struct PendingIngestRun {
     pub touched_resources_json: String,
     pub request_json: Option<String>,
     pub current_backup_dir: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingRestoreRun {
+    pub run_id: String,
+    pub target_snapshot_id: String,
+    pub pre_restore_snapshot_id: String,
+    pub expected_manifest_id: String,
+    pub phase: String,
 }
 
 fn add_column_if_missing(
