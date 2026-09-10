@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
-use corpusbot_agent::{DraftPlan, LlmClient, SourceAgent, SourceAnalysis};
+use corpusbot_agent::{DraftPlan, LlmClient, SourceAgent};
 use corpusbot_core::{
     Frontmatter, IsoDate, PageIdentity, PageType, ResourceId, ResourceRevision, Revision,
     SourceRef, WikiDoc, Wikilink,
@@ -39,7 +39,7 @@ pub struct Ingestor<C> {
 
 impl<C> Ingestor<C>
 where
-    C: LlmClient,
+    C: LlmClient + 'static,
 {
     pub fn new(client: C) -> Self {
         Self {
@@ -107,6 +107,7 @@ where
         let now = OffsetDateTime::now_utc();
         let source_id = format!("src_{}", &sha256[..24]);
         let source_version_id = format!("ver_{}", &sha256[..24]);
+        let run_id = format!("ingest_{}_{:x}", &sha256[..12], now.unix_timestamp_nanos());
         let raw_path = format!("raw/{sha256}/{original_name}");
         let baseline = workspace.revision_manifest()?;
         let source_record = corpusbot_core::SourceRecord::new(
@@ -119,14 +120,24 @@ where
         )?;
 
         let analysis = self
-            .analyze_with_retry(&source_version_id, &markdown)
+            .agent
+            .analyze_source_audited(
+                workspace.paths().root.as_path(),
+                &run_id,
+                baseline.manifest_id(),
+                &source_version_id,
+                &markdown,
+            )
             .await?;
         let existing = existing_pages(workspace)?;
         let related = related_pages(&existing);
-        let mut plan = self
+        let plan = self
             .agent
-            .generate_drafts(
-                workspace.template().as_str(),
+            .generate_drafts_audited(
+                workspace.paths().root.as_path(),
+                &run_id,
+                baseline.manifest_id(),
+                workspace.template(),
                 &analysis.title,
                 &markdown,
                 &analysis,
@@ -134,19 +145,6 @@ where
             )
             .await?;
         validate_plan(&plan, 1)?;
-        if !valid_plan_identities(workspace, &analysis, &plan) {
-            plan = self
-                .agent
-                .generate_drafts(
-                    workspace.template().as_str(),
-                    &analysis.title,
-                    &markdown,
-                    &analysis,
-                    &related,
-                )
-                .await?;
-            validate_plan(&plan, 2)?;
-        }
 
         let source_page = format!("wiki/sources/{source_version_id}.md");
         let source_ref = SourceRef::new(&source_version_id, &analysis.title)?;
@@ -264,7 +262,7 @@ where
         files.insert("wiki/log.md".to_owned(), log.into_bytes());
 
         let request = corpusbot_store::IngestCommitRequest {
-            run_id: format!("ingest_{}_{:x}", &sha256[..12], now.unix_timestamp_nanos()),
+            run_id,
             message: format!("ingest {}", analysis.title),
             source: Some(source_row(&source_record)?),
             files: files.into_iter().collect(),
@@ -287,24 +285,6 @@ where
             snapshot_id: committed.snapshot_id,
             manifest_id: committed.manifest_id,
         })
-    }
-
-    async fn analyze_with_retry(
-        &self,
-        source_hint: &str,
-        markdown: &str,
-    ) -> Result<SourceAnalysis> {
-        let mut last_error = None;
-        for _ in 0..crate::MAX_ANALYSIS_ATTEMPTS {
-            match self.agent.analyze_source(source_hint, markdown).await {
-                Ok(analysis) => return Ok(analysis),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        Err(last_error.map_or_else(
-            || IngestError::Agent(corpusbot_agent::AgentError::EmptyResponse),
-            IngestError::Agent,
-        ))
     }
 }
 
@@ -348,24 +328,6 @@ fn related_pages(existing: &BTreeMap<String, ExistingWikiPage>) -> Vec<(String, 
             )
         })
         .collect()
-}
-
-fn valid_plan_identities(
-    workspace: &Workspace,
-    analysis: &SourceAnalysis,
-    plan: &DraftPlan,
-) -> bool {
-    let entities_valid = analysis.entities.iter().all(|entity| {
-        PageIdentity::new(workspace.template(), PageType::Entity, &entity.name).is_ok()
-    }) && plan.entities.iter().all(|entity| {
-        PageIdentity::new(workspace.template(), PageType::Entity, &entity.name).is_ok()
-    });
-    let concepts_valid = analysis.concepts.iter().all(|concept| {
-        PageIdentity::new(workspace.template(), PageType::Concept, &concept.name).is_ok()
-    }) && plan.concepts.iter().all(|concept| {
-        PageIdentity::new(workspace.template(), PageType::Concept, &concept.name).is_ok()
-    });
-    entities_valid && concepts_valid
 }
 
 fn validate_plan(plan: &DraftPlan, attempt: u32) -> Result<()> {

@@ -12,8 +12,8 @@ pub use config::{SettingsInput, SettingsSummary, load_settings, provider_config,
 pub use error::{AgentError, Result};
 pub use llm::{FakeLlmClient, LlmClient, LlmRequest, LlmResponse, RigLlmClient};
 pub use task::{
-    Citation, ConceptAnalysis, DraftPlan, EntityAnalysis, QueryAnswer, QueryContextPage,
-    SourceAgent, SourceAnalysis,
+    ANALYZE_PROMPT_ID, Citation, ConceptAnalysis, DRAFT_PROMPT_ID, DraftPlan, EntityAnalysis,
+    QUERY_PROMPT_ID, QueryAnswer, QueryContextPage, SourceAgent, SourceAnalysis,
 };
 pub use workflow::{AttemptStatus, Transition, WorkflowNode, WorkflowOutcome};
 
@@ -21,6 +21,10 @@ pub const MAX_ATTEMPTS: u32 = 2;
 
 pub fn can_retry(attempt: u32) -> bool {
     attempt < MAX_ATTEMPTS
+}
+
+pub fn query_run_id() -> String {
+    format!("query_{}", uuid::Uuid::new_v4())
 }
 
 #[cfg(test)]

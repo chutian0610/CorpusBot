@@ -120,12 +120,12 @@ impl<S> WorkflowContext<S> {
     pub fn record_llm_response(
         &mut self,
         response: &LlmResponse,
-        template_id: &str,
+        request: &crate::llm::LlmRequest,
         latency_ms: u64,
     ) {
         self.last_llm_call = Some(LlmCallTelemetry {
-            prompt_template_id: template_id.to_owned(),
-            prompt_hash: String::new(),
+            prompt_template_id: request.prompt_template_id.clone(),
+            prompt_hash: request.prompt_hash(),
             provider: response.provider.clone(),
             model: response.model.clone(),
             latency_ms,
