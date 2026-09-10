@@ -111,6 +111,19 @@ pub struct GitIdentity {
     pub email: String,
 }
 
+enum SnapshotCapture {
+    Clean {
+        snapshot_id: String,
+        manifest_id: String,
+    },
+    Dirty(CapturedSnapshot),
+}
+
+struct CapturedSnapshot {
+    updates: Vec<corpusbot_vcs::ScopedUpdate>,
+    manifest: RevisionManifest,
+}
+
 pub struct Workspace {
     paths: WorkspacePaths,
     template: Template,
@@ -461,27 +474,62 @@ impl Workspace {
         self.reconcile_pending_restore()?;
         self.reconcile_pending_ingest()?;
         let lock = WorkspaceLock::acquire(&self.paths.root, "snapshot")?;
+        match self.capture_snapshot_locked(&lock)? {
+            SnapshotCapture::Clean {
+                snapshot_id,
+                manifest_id,
+            } => {
+                drop(lock);
+                Ok(SnapshotResult {
+                    result: "already_clean".to_owned(),
+                    snapshot_id,
+                    manifest_id,
+                    workspace_changed_after_capture: false,
+                })
+            }
+            SnapshotCapture::Dirty(captured) => {
+                let result = self.commit_snapshot_locked(&lock, message, captured)?;
+                drop(lock);
+                Ok(result)
+            }
+        }
+    }
+
+    fn capture_snapshot_locked(&self, _lock: &WorkspaceLock) -> Result<SnapshotCapture> {
         let head_before = self.repository.head_id()?;
         if !self.repository.is_dirty()? {
-            let head = head_before.ok_or_else(|| StoreError::SnapshotNotFound("HEAD".into()))?;
-            let manifest_id = capture_manifest(&self.paths.root, head.as_str())?;
-            drop(lock);
-            return Ok(SnapshotResult {
-                result: "already_clean".to_owned(),
-                snapshot_id: head,
+            let snapshot_id =
+                head_before.ok_or_else(|| StoreError::SnapshotNotFound("HEAD".into()))?;
+            let manifest_id = capture_manifest(&self.paths.root, &snapshot_id)?;
+            return Ok(SnapshotCapture::Clean {
+                snapshot_id,
                 manifest_id,
-                workspace_changed_after_capture: false,
             });
         }
 
-        let snapshot = self.repository.snapshot_scoped(message, &[])?;
-        let manifest_id = capture_manifest(&self.paths.root, &snapshot.commit_id)?;
-        drop(lock);
+        let updates = self.repository.scoped_updates()?;
+        let manifest = manifest_from_scope(&updates, head_before.as_deref().unwrap_or_default())?;
+        Ok(SnapshotCapture::Dirty(CapturedSnapshot {
+            updates,
+            manifest,
+        }))
+    }
+
+    fn commit_snapshot_locked(
+        &self,
+        _lock: &WorkspaceLock,
+        message: &str,
+        captured: CapturedSnapshot,
+    ) -> Result<SnapshotResult> {
+        let CapturedSnapshot { updates, manifest } = captured;
+        let snapshot = self.repository.commit_scoped(message, &updates, &[])?;
+        let current_manifest = capture_revision_manifest(&self.paths.root, &snapshot.commit_id)?;
         Ok(SnapshotResult {
             result: "created".to_owned(),
             snapshot_id: snapshot.commit_id,
-            manifest_id,
-            workspace_changed_after_capture: false,
+            manifest_id: manifest.manifest_id().to_owned(),
+            workspace_changed_after_capture: current_manifest.manifest_id()
+                != manifest.manifest_id(),
         })
     }
 
@@ -932,6 +980,21 @@ fn capture_manifest(root: &Path, head_snapshot_id: &str) -> Result<String> {
         .to_owned())
 }
 
+fn manifest_from_scope(
+    updates: &[corpusbot_vcs::ScopedUpdate],
+    head_snapshot_id: &str,
+) -> Result<RevisionManifest> {
+    let mut resources = Vec::new();
+    for update in updates {
+        let Some(content) = update.content() else {
+            continue;
+        };
+        let resource = ResourceId::new(update.path())?;
+        resources.push(ResourceRevision::content(resource, content));
+    }
+    Ok(RevisionManifest::capture(resources, head_snapshot_id)?)
+}
+
 pub fn hex(content: &[u8]) -> String {
     format!("{:x}", Sha256::digest(content))
 }
@@ -994,6 +1057,57 @@ Raft elects a leader.
 
         let history = workspace.history(10)?;
         assert!(history.len() >= 4);
+        Ok(())
+    }
+
+    #[test]
+    fn clean_snapshot_returns_head_without_a_new_commit() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        let head = workspace
+            .summary()?
+            .head_snapshot_id
+            .expect("init snapshot");
+
+        let snapshot = workspace.snapshot("clean")?;
+        assert_eq!(snapshot.result, "already_clean");
+        assert_eq!(snapshot.snapshot_id, head);
+        assert!(!snapshot.workspace_changed_after_capture);
+        assert_eq!(workspace.history(10)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn dirty_snapshot_freezes_capture_and_reports_later_changes() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        let path = root.path().join("wiki/entities/Raft.md");
+        std::fs::create_dir_all(path.parent().expect("wiki parent"))?;
+        std::fs::write(&path, PAGE)?;
+
+        let lock = WorkspaceLock::acquire(root.path(), "snapshot-test")?;
+        let captured = match workspace.capture_snapshot_locked(&lock)? {
+            SnapshotCapture::Dirty(captured) => captured,
+            SnapshotCapture::Clean { .. } => panic!("dirty workspace captured as clean"),
+        };
+        std::fs::write(&path, PAGE.replace("Raft elects", "The user changed Raft"))?;
+        let snapshot = workspace.commit_snapshot_locked(&lock, "captured", captured)?;
+        drop(lock);
+
+        assert_eq!(snapshot.result, "created");
+        assert!(snapshot.workspace_changed_after_capture);
+        let committed = workspace.repository.scoped_content(&snapshot.snapshot_id)?;
+        assert_eq!(
+            committed.get("wiki/entities/Raft.md").map(Vec::as_slice),
+            Some(PAGE.as_bytes())
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path)?,
+            PAGE.replace("Raft elects", "The user changed Raft")
+        );
+        assert!(!workspace.status()?.dirty_paths.is_empty());
         Ok(())
     }
 
