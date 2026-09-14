@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::config::ProviderConfig;
 use crate::error::{AgentError, Result};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct LlmRequest {
     pub operation: String,
     pub system: String,

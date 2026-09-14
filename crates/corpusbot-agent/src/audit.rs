@@ -67,6 +67,12 @@ impl WorkflowAuditEvent {
 #[async_trait]
 pub trait AuditSink: Send + Sync {
     async fn record(&self, event: WorkflowAuditEvent) -> Result<()>;
+    async fn store_artifact(
+        &self,
+        run_id: &str,
+        file_name: &str,
+        contents: &[u8],
+    ) -> Result<String>;
 }
 
 #[derive(Clone)]
@@ -107,5 +113,25 @@ impl AuditSink for FileAuditSink {
         file.write_all(line.as_bytes()).await?;
         file.flush().await?;
         Ok(())
+    }
+
+    async fn store_artifact(
+        &self,
+        run_id: &str,
+        file_name: &str,
+        contents: &[u8],
+    ) -> Result<String> {
+        if run_id.is_empty() || run_id.contains(['/', '\\', '\0']) {
+            return Err(AgentError::Audit("invalid run id".to_owned()));
+        }
+        if file_name.contains(['/', '\\', '\0']) || file_name.trim().is_empty() {
+            return Err(AgentError::Audit("invalid artifact name".to_owned()));
+        }
+        let path = self.root.join(run_id).join(file_name);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(path, contents).await?;
+        Ok(format!("audit/{run_id}/{file_name}"))
     }
 }

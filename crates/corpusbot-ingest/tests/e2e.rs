@@ -1,4 +1,7 @@
-use corpusbot_agent::{FakeLlmClient, QueryContextPage, SourceAgent};
+use corpusbot_agent::{
+    ANALYZE_PROMPT_ID, DRAFT_PROMPT_ID, FakeLlmClient, QUERY_PROMPT_ID, QueryContextPage,
+    SourceAgent,
+};
 use corpusbot_core::Template;
 use corpusbot_ingest::Ingestor;
 use corpusbot_lint::engine::run_lint;
@@ -135,7 +138,9 @@ async fn fake_llm_end_to_end_compiles_searches_answers_lints_and_restores()
         .ingest_file(&workspace, &source_two)
         .await?;
     let corpusbot_ingest::IngestResult::Committed {
-        ref updated_paths, ..
+        run_id: ref second_run_id,
+        ref updated_paths,
+        ..
     } = second
     else {
         panic!("second ingest should commit");
@@ -147,6 +152,15 @@ async fn fake_llm_end_to_end_compiles_searches_answers_lints_and_restores()
             .iter()
             .any(|path| path.starts_with("wiki/concepts/"))
     );
+    let ingest_ledger = std::fs::read_to_string(
+        root.path()
+            .join(".wiki-db/audit")
+            .join(second_run_id)
+            .join("events.jsonl"),
+    )?;
+    assert!(ingest_ledger.contains(ANALYZE_PROMPT_ID));
+    assert!(ingest_ledger.contains(DRAFT_PROMPT_ID));
+    assert!(ingest_ledger.contains(r#""prompt_hash""#));
 
     let merged_entity = workspace.read_page(&entity_path)?;
     assert!(merged_entity.contains("A leader-based consensus algorithm."));
@@ -176,11 +190,22 @@ async fn fake_llm_end_to_end_compiles_searches_answers_lints_and_restores()
     }];
     let answer_client = FakeLlmClient::new([answer_json]);
     let answer = SourceAgent::new(answer_client)
-        .answer_question("How does Raft elect a leader?", &context)
+        .answer_question_audited(
+            root.path(),
+            "query_e2e",
+            manifest.manifest_id(),
+            "How does Raft elect a leader?",
+            &context,
+        )
         .await?;
     assert!(!answer.insufficient_evidence);
     assert_eq!(answer.citations.len(), 1);
     assert_eq!(answer.citations[0].path, entity_path);
+    let query_ledger =
+        std::fs::read_to_string(root.path().join(".wiki-db/audit/query_e2e/events.jsonl"))?;
+    assert!(query_ledger.contains(r#""node":"retrieve_context""#));
+    assert!(!query_ledger.contains(ANALYZE_PROMPT_ID));
+    assert!(query_ledger.contains(QUERY_PROMPT_ID));
 
     let lint = run_lint(root.path(), Template::Research, manifest.manifest_id())?;
     assert_eq!(lint.summary.errors, 0);

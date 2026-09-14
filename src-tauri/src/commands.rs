@@ -195,7 +195,13 @@ pub async fn query(
     let client =
         RigLlmClient::new(provider_config().map_err(|error| CommandError(error.to_string()))?)?;
     let mut answer = SourceAgent::new(client)
-        .answer_question(&question, &context)
+        .answer_question_audited(
+            root.as_path(),
+            &corpusbot_agent::query_run_id(),
+            &manifest_id,
+            &question,
+            &context,
+        )
         .await
         .map_err(|error| CommandError(error.to_string()))?;
     answer.revision_manifest_id = manifest_id;

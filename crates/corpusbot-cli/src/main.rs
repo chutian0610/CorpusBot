@@ -197,7 +197,15 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .collect::<Vec<_>>();
 
-            let answer = agent.answer_question(&question, &context).await?;
+            let answer = agent
+                .answer_question_audited(
+                    root.as_path(),
+                    &corpusbot_agent::query_run_id(),
+                    manifest.manifest_id(),
+                    &question,
+                    &context,
+                )
+                .await?;
             println!("{}", serde_json::to_string_pretty(&answer)?);
         }
         Command::Lint { root, format } => {
