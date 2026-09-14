@@ -1,0 +1,42 @@
+[
+  {
+    "id": "raft-leader",
+    "question": "In Raft, what is required for a candidate to become leader?"
+  },
+  {
+    "id": "raft-replication",
+    "question": "How does Raft commit a replicated log entry?"
+  },
+  {
+    "id": "vector-similarity",
+    "question": "How does a vector database find items related to a query?"
+  },
+  {
+    "id": "rag-evidence",
+    "question": "Why is retrieved evidence important in retrieval-augmented generation?"
+  },
+  {
+    "id": "rag-citations",
+    "question": "What should a trustworthy retrieval-augmented answer do with its evidence?"
+  },
+  {
+    "id": "transformer-attention",
+    "question": "What does attention do in a transformer model?"
+  },
+  {
+    "id": "sqlite-wal",
+    "question": "What is the benefit of SQLite write-ahead logging?"
+  },
+  {
+    "id": "git-commit-identity",
+    "question": "How is a Git commit identified and why is it tamper-evident?"
+  },
+  {
+    "id": "bm25-ranking",
+    "question": "How does BM25 rank search results?"
+  },
+  {
+    "id": "zettelkasten-atomic-notes",
+    "question": "Zettelkasten 方法为什么要使用原子笔记和反向链接？"
+  }
+]

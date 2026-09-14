@@ -18,4 +18,5 @@ corpusbot-lint.workspace = true
 corpusbot-search.workspace = true
 corpusbot-store.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 tokio.workspace = true

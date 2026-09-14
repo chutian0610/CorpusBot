@@ -698,6 +698,7 @@ dependencies = [
  "corpusbot-lint",
  "corpusbot-search",
  "corpusbot-store",
+ "serde",
  "serde_json",
  "tokio",
 ]
