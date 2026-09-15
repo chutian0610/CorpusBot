@@ -83,6 +83,25 @@ The runner creates a temporary workspace, ingests every source in
 workspace for debugging, `WORKSPACE` to reuse a path, `REPORT` to move the
 report, and `MIN_PASS_RATE` to change the acceptance threshold.
 
+## Desktop browser E2E
+
+The desktop interface has a browser-only backend that is enabled only by opening:
+
+```text
+http://127.0.0.1:1420/?backend=browser
+```
+
+It provides deterministic workspace data so Playwright can exercise the React
+interface without starting a Tauri process or calling a real provider:
+
+```bash
+pnpm exec playwright install chromium
+pnpm test:e2e
+```
+
+The E2E flow opens a workspace, reads a page, imports Markdown, asks a cited
+question, checks the Lint report, and restores a snapshot.
+
 ## Current MVP limitations
 
 - Ingest is serial and Markdown-only; PDF/EPUB/HTML import is not implemented.
