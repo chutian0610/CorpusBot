@@ -602,7 +602,7 @@ fn query_request(question: &str, context: &[QueryContextPage]) -> LlmRequest {
         prompt: format!("# Question\n\n{question}\n\n# Evidence\n\n{evidence}"),
         prompt_template_id: QUERY_PROMPT_ID.to_owned(),
         temperature: Some(0.1),
-        max_tokens: Some(1500),
+        max_tokens: Some(3000),
     }
 }
 
@@ -710,7 +710,7 @@ fn validate_draft_plan(plan: &DraftPlan, template: corpusbot_core::Template) -> 
 }
 
 fn parse_json<T: for<'de> Deserialize<'de>>(response: &LlmResponse) -> Result<T> {
-    let mut text = response.text.trim();
+    let mut text = strip_reasoning(&response.text);
     if text.starts_with("```") {
         text = text.trim_start_matches("```json").trim_start_matches("```");
         text = text.trim_end_matches("```").trim();
@@ -728,6 +728,18 @@ fn parse_json<T: for<'de> Deserialize<'de>>(response: &LlmResponse) -> Result<T>
     Ok(value)
 }
 
+fn strip_reasoning(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(start) = trimmed.find("<think>") else {
+        return trimmed;
+    };
+    let Some(end_offset) = trimmed[start..].find("</think>") else {
+        return trimmed;
+    };
+    let end = start + end_offset + "</think>".len();
+    trimmed[end..].trim()
+}
+
 const ANALYZE_SYSTEM: &str = r#"You are a precise research analyst. Return only a JSON object, without Markdown fences.
 Required shape:
 {"title":"string","summary":"string","entities":[{"name":"string","aliases":["string"],"summary":"string"}],"concepts":[{"name":"string","definition":"string"}]}
@@ -739,9 +751,10 @@ For the template named {template}, produce concise source-attributed summaries:
 Do not invent facts or add links."#;
 
 const QUERY_SYSTEM: &str = r#"You are a wiki research assistant. Answer only from numbered evidence.
-Return only JSON:
+Return exactly one JSON object and no other content. Do not emit reasoning, <think>, Markdown fences, or text before or after JSON.
 {"answer":"string with [number] citations","citations":[{"number":1,"path":"wiki/page.md","quote":"exact evidence quote","revision":{"kind":"content","value":{"sha256":"..."}}}]}
-Quotes must be copied exactly from evidence. If evidence is insufficient, use an empty citations array."#;
+Quotes must be copied exactly from evidence. If evidence is insufficient, use an empty citations array.
+Use unescaped double quotes only as JSON string delimiters. Inside any JSON string, escape double quotes as \" or, preferably, use 「」 for quoted terms."#;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryContextPage {
@@ -810,6 +823,27 @@ mod tests {
         let client = FakeLlmClient::new([r#"{"wrong":true}"#]);
         let agent = SourceAgent::new(client);
         assert!(agent.analyze_source("Raft", "# Raft").await.is_err());
+    }
+
+    #[test]
+    fn parses_json_after_reasoning_block() -> Result<()> {
+        let response = LlmResponse {
+            text: r#"<think>
+Need JSON.
+</think>
+```json
+{"title":"Raft","summary":"Consensus"}
+```"#
+                .to_owned(),
+            provider: "fake".to_owned(),
+            model: "fake-model".to_owned(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            response_id: None,
+        };
+        let analysis = parse_json::<SourceAnalysis>(&response)?;
+        assert_eq!(analysis.title, "Raft");
+        Ok(())
     }
 
     #[tokio::test]
