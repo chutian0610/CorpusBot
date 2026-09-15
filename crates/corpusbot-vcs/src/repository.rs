@@ -91,8 +91,22 @@ impl RepositoryHandle {
     }
 
     pub fn ensure_main(&self) -> Result<()> {
-        if self.repository.head()?.shorthand() != Some("main") {
-            return Err(VcsError::NotMain);
+        match self.repository.head() {
+            Ok(head) => {
+                if head.shorthand() != Some("main") {
+                    return Err(VcsError::NotMain);
+                }
+            }
+            Err(error)
+                if error.code() == git2::ErrorCode::NotFound
+                    || error.code() == git2::ErrorCode::UnbornBranch =>
+            {
+                let head = self.repository.find_reference("HEAD")?;
+                if head.symbolic_target() != Some(MAIN_BRANCH) {
+                    return Err(VcsError::NotMain);
+                }
+            }
+            Err(error) => return Err(error.into()),
         }
         Ok(())
     }
@@ -462,6 +476,14 @@ fn oid(value: &str) -> Result<git2::Oid> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_repository_is_on_main() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let repository = RepositoryHandle::init(temp.path())?;
+        repository.ensure_main()?;
+        Ok(())
+    }
 
     #[test]
     fn only_workspace_scope_is_committed() -> Result<()> {

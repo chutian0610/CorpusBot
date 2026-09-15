@@ -250,3 +250,42 @@ async fn touched_resource_conflict_rejects_commit_without_partial_write()
     let _ = resource;
     Ok(())
 }
+
+#[tokio::test]
+async fn untouched_concurrent_edit_survives_cas_commit() -> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    Workspace::init(root.path(), Template::Research)?;
+    let workspace = Workspace::open(root.path(), Template::Research)?;
+    std::fs::create_dir_all(root.path().join("wiki/entities"))?;
+    std::fs::create_dir_all(root.path().join("wiki/notes"))?;
+    let touched = root.path().join("wiki/entities/raft.md");
+    let untouched = root.path().join("wiki/notes/parallel.md");
+    std::fs::write(&touched, "original")?;
+    std::fs::write(&untouched, "original untouched")?;
+    workspace.snapshot("baseline")?;
+
+    let resource =
+        corpusbot_core::ResourceId::page(corpusbot_core::WikiPath::parse("wiki/entities/raft.md")?);
+    let baseline = workspace.revision_manifest()?;
+    std::fs::write(&untouched, "externally edited untouched page")?;
+
+    let request = corpusbot_store::IngestCommitRequest {
+        run_id: "untouched-edit-run".to_owned(),
+        message: "ingest with untouched concurrent edit".to_owned(),
+        source: None,
+        files: vec![("wiki/entities/raft.md".to_owned(), b"draft".to_vec())],
+        pages: Vec::new(),
+        touched: vec![corpusbot_core::ResourceRevision::content(
+            resource,
+            b"original",
+        )],
+        baseline_manifest: baseline,
+    };
+
+    workspace.commit_ingest(&request)?;
+    assert_eq!(
+        workspace.read_page("wiki/notes/parallel.md")?,
+        "externally edited untouched page"
+    );
+    Ok(())
+}
