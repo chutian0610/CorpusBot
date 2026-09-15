@@ -234,6 +234,10 @@ export async function invokeBrowserCommand<T>(command: string, args: CommandArgs
         baseUrl: 'https://browser-e2e.invalid/v1',
         model: 'browser-e2e-model',
         hasApiKey: false,
+        baseUrlSource: 'settings',
+        modelSource: 'settings',
+        apiKeySource: null,
+        environmentOverrides: [],
         gitAuthorName: 'CorpusBot E2E',
         gitAuthorEmail: 'e2e@corpusbot.invalid',
       };

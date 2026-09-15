@@ -276,6 +276,13 @@ function HistoryView() {
 function SettingsView() {
   const settingsForm = useWorkspaceStore((state) => state.settingsForm);
   const settings = useWorkspaceStore((state) => state.settings);
+  const sourceLabel = (source?: 'environment' | 'settings' | 'default' | null) => {
+    if (source === 'environment') return 'env';
+    if (source === 'settings') return 'saved';
+    if (source === 'default') return 'default';
+    return undefined;
+  };
+
   const update = useWorkspaceStore((state) => state.updateSettingsForm);
   const loadSettings = useWorkspaceStore((state) => state.loadSettings);
   const saveSettings = useWorkspaceStore((state) => state.saveSettings);
@@ -293,7 +300,14 @@ function SettingsView() {
       }}
     >
       <label className="block space-y-1 text-sm">
-        <span className="font-medium">Base URL</span>
+        <span className="flex items-center gap-2">
+          <span className="font-medium">Base URL</span>
+          {sourceLabel(settings?.baseUrlSource) ? (
+            <span className="rounded bg-stone-100 px-1 text-xs text-stone-500">
+              {sourceLabel(settings?.baseUrlSource)}
+            </span>
+          ) : null}
+        </span>
         <input
           value={settingsForm.baseUrl}
           onChange={(event) => update({ baseUrl: event.target.value })}
@@ -302,7 +316,14 @@ function SettingsView() {
         />
       </label>
       <label className="block space-y-1 text-sm">
-        <span className="font-medium">Model</span>
+        <span className="flex items-center gap-2">
+          <span className="font-medium">Model</span>
+          {sourceLabel(settings?.modelSource) ? (
+            <span className="rounded bg-stone-100 px-1 text-xs text-stone-500">
+              {sourceLabel(settings?.modelSource)}
+            </span>
+          ) : null}
+        </span>
         <input
           value={settingsForm.model}
           onChange={(event) => update({ model: event.target.value })}
@@ -311,11 +332,24 @@ function SettingsView() {
         />
       </label>
       <label className="block space-y-1 text-sm">
-        <span className="font-medium">API key</span>
+        <span className="flex items-center gap-2">
+          <span className="font-medium">API key</span>
+          {sourceLabel(settings?.apiKeySource) ? (
+            <span className="rounded bg-stone-100 px-1 text-xs text-stone-500">
+              {sourceLabel(settings?.apiKeySource)}
+            </span>
+          ) : null}
+        </span>
         <input
           value={settingsForm.apiKey ?? ''}
           onChange={(event) => update({ apiKey: event.target.value })}
-          placeholder={settings?.hasApiKey ? 'Saved key stays active' : 'Enter API key'}
+          placeholder={
+            settings?.apiKeySource === 'environment'
+              ? 'Environment key is active'
+              : settings?.apiKeySource === 'settings'
+                ? 'Saved key stays active'
+                : 'Enter API key'
+          }
           type="password"
           className="w-full rounded-md border px-3 py-2"
         />
@@ -338,6 +372,15 @@ function SettingsView() {
           />
         </label>
       </div>
+      {settings?.environmentOverrides.length ? (
+        <div
+          role="note"
+          className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800"
+        >
+          Environment overrides are active: {settings.environmentOverrides.join(', ')}. These values
+          take precedence over saved settings.
+        </div>
+      ) : null}
       <button className="rounded-md bg-moss px-3 py-2 text-sm font-medium text-white">
         Save settings
       </button>

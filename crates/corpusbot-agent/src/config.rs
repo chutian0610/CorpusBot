@@ -27,6 +27,10 @@ pub struct SettingsSummary {
     pub base_url: String,
     pub model: String,
     pub has_api_key: bool,
+    pub base_url_source: String,
+    pub model_source: String,
+    pub api_key_source: Option<String>,
+    pub environment_overrides: Vec<String>,
     pub git_author_name: Option<String>,
     pub git_author_email: Option<String>,
 }
@@ -52,12 +56,57 @@ pub fn settings_path() -> Result<std::path::PathBuf> {
 
 pub fn load_settings() -> Result<SettingsSummary> {
     let file = read_settings()?;
-    let base_url = file.base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
-    let model = file.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+    let env_base_url = non_empty_env("OPENAI_BASE_URL");
+    let env_api_key = non_empty_env("OPENAI_API_KEY");
+    let env_model = non_empty_env("CORPUSBOT_MODEL");
+    let mut environment_overrides = Vec::new();
+    if env_base_url.is_some() {
+        environment_overrides.push("Base URL".to_owned());
+    }
+    if env_api_key.is_some() {
+        environment_overrides.push("API key".to_owned());
+    }
+    if env_model.is_some() {
+        environment_overrides.push("Model".to_owned());
+    }
+
+    let base_url_source = if env_base_url.is_some() {
+        "environment"
+    } else if file.base_url.is_some() {
+        "settings"
+    } else {
+        "default"
+    };
+    let model_source = if env_model.is_some() {
+        "environment"
+    } else if file.model.is_some() {
+        "settings"
+    } else {
+        "default"
+    };
+    let api_key_source = if env_api_key.is_some() {
+        Some("environment")
+    } else if file.api_key.is_some() {
+        Some("settings")
+    } else {
+        None
+    };
+
+    let base_url = env_base_url
+        .or(file.base_url)
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+    let model = env_model
+        .or(file.model)
+        .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
     Ok(SettingsSummary {
         base_url,
         model,
-        has_api_key: file.api_key.is_some_and(|key| !key.trim().is_empty()),
+        has_api_key: env_api_key.is_some()
+            || file.api_key.is_some_and(|key| !key.trim().is_empty()),
+        base_url_source: base_url_source.to_owned(),
+        model_source: model_source.to_owned(),
+        api_key_source: api_key_source.map(str::to_owned),
+        environment_overrides,
         git_author_name: file.git_author_name,
         git_author_email: file.git_author_email,
     })
@@ -145,19 +194,23 @@ fn read_settings() -> Result<SettingsFile> {
 
 pub fn provider_config() -> Result<ProviderConfig> {
     let file = read_settings()?;
-    let base_url = std::env::var("OPENAI_BASE_URL")
-        .ok()
+    let base_url = non_empty_env("OPENAI_BASE_URL")
         .or(file.base_url)
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .ok()
+    let api_key = non_empty_env("OPENAI_API_KEY")
         .or(file.api_key)
         .unwrap_or_default();
-    let model = std::env::var("CORPUSBOT_MODEL")
-        .ok()
+    let model = non_empty_env("CORPUSBOT_MODEL")
         .or(file.model)
         .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
     ProviderConfig::new(base_url, api_key, model)
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 impl ProviderConfig {

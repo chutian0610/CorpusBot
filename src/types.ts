@@ -95,6 +95,10 @@ export type SettingsSummary = {
   baseUrl: string;
   model: string;
   hasApiKey: boolean;
+  baseUrlSource: 'environment' | 'settings' | 'default';
+  modelSource: 'environment' | 'settings' | 'default';
+  apiKeySource?: 'environment' | 'settings' | null;
+  environmentOverrides: string[];
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
 };
