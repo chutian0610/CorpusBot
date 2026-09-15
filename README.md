@@ -64,6 +64,25 @@ Environment variables take precedence over the saved settings:
 
 The MVP uses Chat Completions-compatible endpoints and requires typed JSON responses.
 
+## MVP citation evaluation
+
+The fixed evaluation set contains eight Markdown sources and ten questions. Each
+answer must keep at least one citation whose path and quote are validated
+against the current revision manifest. The default acceptance threshold is 80%.
+
+Run the evaluation against a real OpenAI-compatible endpoint with:
+
+```bash
+OPENAI_API_KEY=... scripts/llm-evaluation.sh
+```
+
+The runner creates a temporary workspace, ingests every source in
+`fixtures/mvp-eval/sources`, runs lint, asks all questions in
+`fixtures/mvp-eval/questions.json`, and writes a JSON report to
+`target/corpusbot-mvp-evaluation.json`. Set `KEEP_WORKSPACE=1` to retain the
+workspace for debugging, `WORKSPACE` to reuse a path, `REPORT` to move the
+report, and `MIN_PASS_RATE` to change the acceptance threshold.
+
 ## Current MVP limitations
 
 - Ingest is serial and Markdown-only; PDF/EPUB/HTML import is not implemented.
