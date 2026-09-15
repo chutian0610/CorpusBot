@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::error::CommandError;
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspacePage {
     pub path: String,
     pub title: String,
@@ -27,6 +28,7 @@ pub struct WorkspacePage {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RestoreResult {
     pub snapshot_id: String,
     pub restored: bool,
@@ -271,4 +273,179 @@ pub fn get_settings() -> Result<SettingsSummary, CommandError> {
 #[tauri::command]
 pub fn save_settings(settings: SettingsInput) -> Result<SettingsSummary, CommandError> {
     corpusbot_agent::save_settings(settings).map_err(|error| CommandError(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use corpusbot_agent::Citation;
+    use corpusbot_core::Revision;
+    use corpusbot_ingest::IngestResult;
+    use corpusbot_lint::{LintIssue, LintReport, LintSummary, Severity};
+    use corpusbot_store::{PageRow, SnapshotRow, WorkspaceStatus};
+    use serde_json::{Value, json};
+
+    #[test]
+    fn page_commands_use_camel_case() -> Result<(), serde_json::Error> {
+        let page = serde_json::to_value(WorkspacePage {
+            path: "wiki/entities/raft.md".to_owned(),
+            title: "Raft".to_owned(),
+            page_type: "entity".to_owned(),
+            tags: vec![],
+            related: vec![],
+            sources: vec![],
+            markdown: "Raft".to_owned(),
+        })?;
+        assert_eq!(page["pageType"], "entity");
+
+        let restore = serde_json::to_value(RestoreResult {
+            snapshot_id: "snapshot".to_owned(),
+            restored: true,
+        })?;
+        assert_eq!(restore["snapshotId"], "snapshot");
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_commands_use_camel_case() -> Result<(), serde_json::Error> {
+        let summary = serde_json::to_value(corpusbot_store::WorkspaceSummary {
+            root: "/tmp/workspace".to_owned(),
+            template: "research".to_owned(),
+            head_snapshot_id: Some("head".to_owned()),
+        })?;
+        assert_eq!(summary["headSnapshotId"], "head");
+
+        let status = serde_json::to_value(WorkspaceStatus {
+            root: "/tmp/workspace".to_owned(),
+            template: "research".to_owned(),
+            head_snapshot_id: Some("head".to_owned()),
+            dirty_paths: vec!["wiki/index.md".to_owned()],
+            unsafe_state: None,
+            recovery_pending: false,
+            page_count: 1,
+        })?;
+        assert_eq!(status["dirtyPaths"], json!(["wiki/index.md"]));
+        assert_eq!(status["recoveryPending"], false);
+        assert_eq!(status["pageCount"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn page_and_snapshot_rows_use_camel_case() -> Result<(), serde_json::Error> {
+        let page_row = serde_json::to_value(PageRow {
+            path: "wiki/entities/raft.md".to_owned(),
+            title: "Raft".to_owned(),
+            page_type: "entity".to_owned(),
+            sha256: "sha".to_owned(),
+            updated_at: "2026-09-15".to_owned(),
+        })?;
+        assert_eq!(page_row["pageType"], "entity");
+        assert_eq!(page_row["updatedAt"], "2026-09-15");
+
+        let snapshot_row = serde_json::to_value(SnapshotRow {
+            snapshot_id: "snapshot".to_owned(),
+            message: "baseline".to_owned(),
+            created_at: 0,
+        })?;
+        assert_eq!(snapshot_row["snapshotId"], "snapshot");
+        assert_eq!(snapshot_row["createdAt"], 0);
+        Ok(())
+    }
+
+    #[test]
+    fn ingest_result_uses_camel_case() -> Result<(), serde_json::Error> {
+        let ingest = serde_json::to_value(IngestResult::Committed {
+            run_id: "run".to_owned(),
+            source_id: "source".to_owned(),
+            source_version_id: "version".to_owned(),
+            source_page: "wiki/sources/source.md".to_owned(),
+            created_paths: vec![],
+            updated_paths: vec![],
+            snapshot_id: "snapshot".to_owned(),
+            manifest_id: "manifest".to_owned(),
+        })?;
+        assert_eq!(ingest["status"], "committed");
+        assert_eq!(ingest["runId"], "run");
+        assert_eq!(ingest["sourceVersionId"], "version");
+        assert_eq!(ingest["manifestId"], "manifest");
+        Ok(())
+    }
+
+    #[test]
+    fn query_answer_uses_camel_case() -> Result<(), serde_json::Error> {
+        let query = serde_json::to_value(corpusbot_agent::QueryAnswer {
+            answer: "Raft".to_owned(),
+            citations: vec![Citation {
+                number: 1,
+                path: "wiki/entities/raft.md".to_owned(),
+                title: "Raft".to_owned(),
+                quote: "Raft".to_owned(),
+                resource_revision: Revision::from_content(b"Raft"),
+            }],
+            revision_manifest_id: "manifest".to_owned(),
+            warnings: vec![],
+            insufficient_evidence: false,
+        })?;
+        assert_eq!(query["revisionManifestId"], "manifest");
+        assert_eq!(query["insufficientEvidence"], false);
+        assert_eq!(query["citations"][0]["resourceRevision"]["kind"], "content");
+        Ok(())
+    }
+
+    #[test]
+    fn lint_report_uses_camel_case() -> Result<(), serde_json::Error> {
+        let lint = serde_json::to_value(LintReport {
+            generated_at: "2026-09-15T00:00:00Z".to_owned(),
+            template: "research".to_owned(),
+            revision_manifest_id: "manifest".to_owned(),
+            summary: LintSummary {
+                pages: 1,
+                errors: 0,
+                warnings: 0,
+            },
+            issues: vec![LintIssue {
+                code: "ORPHAN_PAGE".to_owned(),
+                severity: Severity::Warning,
+                path: "wiki/entities/raft.md".to_owned(),
+                message: "orphan".to_owned(),
+                fix_hint: "link it".to_owned(),
+            }],
+        })?;
+        assert_eq!(lint["generatedAt"], "2026-09-15T00:00:00Z");
+        assert_eq!(lint["revisionManifestId"], "manifest");
+        assert_eq!(lint["issues"][0]["fixHint"], "link it");
+        Ok(())
+    }
+
+    #[test]
+    fn settings_contract_uses_camel_case() -> Result<(), serde_json::Error> {
+        let settings = serde_json::to_value(SettingsSummary {
+            base_url: "https://example.com/v1".to_owned(),
+            model: "mvp-mock".to_owned(),
+            has_api_key: true,
+            git_author_name: Some("CorpusBot".to_owned()),
+            git_author_email: Some("corpusbot@local.invalid".to_owned()),
+        })?;
+        assert_eq!(settings["baseUrl"], "https://example.com/v1");
+        assert_eq!(settings["hasApiKey"], true);
+        assert_eq!(settings["gitAuthorName"], "CorpusBot");
+
+        let input: SettingsInput = serde_json::from_value(json!({
+            "baseUrl": "https://example.com/v1",
+            "model": "mvp-mock",
+            "apiKey": "secret",
+            "gitAuthorName": "CorpusBot",
+            "gitAuthorEmail": "corpusbot@local.invalid"
+        }))?;
+        assert_eq!(input.base_url, "https://example.com/v1");
+        assert_eq!(input.git_author_name.as_deref(), Some("CorpusBot"));
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_errors_serialize_as_messages() -> Result<(), serde_json::Error> {
+        let error = serde_json::to_value(CommandError("workspace is busy".to_owned()))?;
+        assert_eq!(error, Value::String("workspace is busy".to_owned()));
+        Ok(())
+    }
 }

@@ -767,6 +767,7 @@ pub struct QueryContextPage {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueryAnswer {
     pub answer: String,
     pub citations: Vec<Citation>,
@@ -776,6 +777,7 @@ pub struct QueryAnswer {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Citation {
     pub number: u32,
     pub path: String,

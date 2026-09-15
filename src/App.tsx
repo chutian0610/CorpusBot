@@ -422,11 +422,11 @@ export default function App() {
             <h1 className="text-sm font-semibold">Workspace</h1>
           </header>
           <div className="min-h-0 flex-1 overflow-auto p-3">
-            {status?.dirtyPaths.length ? (
+            {status?.dirtyPaths?.length ? (
               <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs">
                 <p className="font-medium">Uncommitted changes</p>
                 <ul className="mt-1 space-y-1">
-                  {status.dirtyPaths.map((path) => (
+                  {status.dirtyPaths?.map((path) => (
                     <li key={path} className="truncate">
                       {path}
                     </li>

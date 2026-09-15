@@ -71,7 +71,7 @@ run_step() {
 }
 
 run_step init "$CLI" init --root "$WORKSPACE" --template research
-INIT_SNAPSHOT_ID="$(json_value head_snapshot_id <"$ARTIFACTS/init.json")"
+INIT_SNAPSHOT_ID="$(json_value headSnapshotId <"$ARTIFACTS/init.json")"
 
 run_step status "$CLI" status --root "$WORKSPACE"
 run_step ingest "$CLI" ingest --root "$WORKSPACE" --file "$SOURCE"
@@ -121,17 +121,17 @@ history = load("history")
 final_status = load("final-status")
 
 assert init["root"] == workspace
-assert len(init["head_snapshot_id"]) == 40
+assert len(init["headSnapshotId"]) == 40
 assert status["page_count"] == 0
 assert status["recovery_pending"] is False
 assert ingest["status"] == "committed"
-assert ingest["created_paths"]
-assert query["insufficient_evidence"] is False
+assert ingest["createdPaths"]
+assert query["insufficientEvidence"] is False
 assert query["citations"]
-assert query["revision_manifest_id"]
+assert query["revisionManifestId"]
 assert lint["summary"]["errors"] == 0
 assert snapshot["result"] == "already_clean"
-assert any(row["snapshot_id"] == init_snapshot_id for row in history)
+assert any(row["snapshotId"] == init_snapshot_id for row in history)
 assert final_status["page_count"] == 0
 assert final_status["recovery_pending"] is False
 
@@ -149,7 +149,7 @@ commands = [
 report = {
     "status": "passed",
     "workspace": workspace,
-    "manifest_id": query["revision_manifest_id"],
+    "manifest_id": query["revisionManifestId"],
     "commands": commands,
     "citations": len(query["citations"]),
     "lint": lint["summary"],

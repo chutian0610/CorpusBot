@@ -8,6 +8,7 @@ pub struct Metadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PageRow {
     pub path: String,
     pub title: String,

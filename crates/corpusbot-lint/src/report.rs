@@ -17,6 +17,7 @@ impl Severity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LintIssue {
     pub code: String,
     pub severity: Severity,
@@ -26,6 +27,7 @@ pub struct LintIssue {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LintSummary {
     pub pages: usize,
     pub errors: usize,
@@ -33,6 +35,7 @@ pub struct LintSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LintReport {
     pub generated_at: String,
     pub template: String,

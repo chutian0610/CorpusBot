@@ -46,6 +46,7 @@ impl WorkspacePaths {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceSummary {
     pub root: String,
     pub template: String,
@@ -53,6 +54,7 @@ pub struct WorkspaceSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceStatus {
     pub root: String,
     pub template: String,
@@ -64,6 +66,7 @@ pub struct WorkspaceStatus {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SnapshotResult {
     pub result: String,
     pub snapshot_id: String,
@@ -72,6 +75,7 @@ pub struct SnapshotResult {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SnapshotRow {
     pub snapshot_id: String,
     pub message: String,

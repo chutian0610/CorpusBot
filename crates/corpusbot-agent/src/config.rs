@@ -22,6 +22,7 @@ struct SettingsFile {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsSummary {
     pub base_url: String,
     pub model: String,
@@ -31,6 +32,7 @@ pub struct SettingsSummary {
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsInput {
     pub base_url: String,
     pub model: String,

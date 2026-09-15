@@ -15,7 +15,11 @@ use time::OffsetDateTime;
 use crate::error::{IngestError, Result};
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "snake_case", tag = "status")]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "status"
+)]
 pub enum IngestResult {
     Committed {
         run_id: String,
