@@ -27,7 +27,7 @@ function statusLabel(status?: {
   if (!status) return 'Unknown';
   if (status.recoveryPending) return 'Recovery pending';
   if (status.unsafeState) return 'Git blocked';
-  if (status.dirtyPaths.length) return 'Dirty';
+  if (status.dirtyPaths?.length) return 'Dirty';
   return 'Clean';
 }
 

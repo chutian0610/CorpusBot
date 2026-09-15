@@ -48,3 +48,14 @@ test('imports, reads, questions, lints, and restores a workspace', async ({ page
   await expect(page.getByRole('button', { name: 'E2E import' })).toHaveCount(0);
   await expect(page.getByText('Clean')).toBeVisible();
 });
+
+test('stays on setup with a clear error when desktop IPC is unavailable', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Workspace path').fill('/tmp/CorpusBot-unavailable');
+  await page.getByRole('button', { name: 'Open' }).click();
+
+  await expect(page.getByRole('alert')).toContainText(
+    'The CorpusBot desktop backend is only available in the app.',
+  );
+  await expect(page.getByRole('heading', { name: 'CorpusBot Workspace' })).toBeVisible();
+});

@@ -9,6 +9,7 @@ export function WorkspaceSetup() {
   const initialize = useWorkspaceStore((state) => state.initialize);
   const open = useWorkspaceStore((state) => state.open);
   const loading = useWorkspaceStore((state) => state.loading);
+  const error = useWorkspaceStore((state) => state.error);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-paper p-6 text-ink">
@@ -25,6 +26,14 @@ export function WorkspaceSetup() {
             Open an existing CorpusBot workspace or create a fresh one.
           </p>
         </div>
+        {error ? (
+          <div
+            role="alert"
+            className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+          >
+            {error}
+          </div>
+        ) : null}
         <label className="block space-y-2">
           <span className="text-sm font-medium">Workspace path</span>
           <input

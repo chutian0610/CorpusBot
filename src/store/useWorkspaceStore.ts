@@ -87,7 +87,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     try {
       const summary = await api.initWorkspace(root, template);
       localStorage.setItem('corpusbot.root', root);
-      set({ root, summary, initialized: true });
+      set({ root, summary });
       await get().refresh();
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
@@ -101,7 +101,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     try {
       const summary = await api.openWorkspace(root);
       localStorage.setItem('corpusbot.root', root);
-      set({ root, summary, initialized: true });
+      set({ root, summary });
       await get().refresh();
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
