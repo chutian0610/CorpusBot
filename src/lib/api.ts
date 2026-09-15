@@ -16,11 +16,19 @@ import type {
 
 export const isDesktopBackend = '__TAURI_INTERNALS__' in window;
 
+function browserBackendEnabled(): boolean {
+  return new URLSearchParams(window.location.search).get('backend') === 'browser';
+}
+
 export async function invokeCommand<T>(
   command: string,
   args?: Record<string, unknown>,
 ): Promise<T> {
   if (!isDesktopBackend) {
+    if (browserBackendEnabled()) {
+      const { invokeBrowserCommand } = await import('./browserBackend');
+      return invokeBrowserCommand<T>(command, args);
+    }
     throw new Error('The CorpusBot desktop backend is only available in the app.');
   }
   return invoke<T>(command, args);

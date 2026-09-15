@@ -10,8 +10,12 @@ node_modules/
 dist/
 coverage/
 .vite/
+playwright-report/
+test-results/
 src-tauri/gen/
 *.local
+.env
+.env.*
 
 # Engine-private workspace state is always ignored in generated wikis.
 .wiki-db/

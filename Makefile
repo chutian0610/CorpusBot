@@ -1,4 +1,4 @@
-.PHONY: install fmt fmt-check lint test typecheck build check clean
+.PHONY: install fmt fmt-check lint test test-e2e typecheck build check clean
 
 install:
 	pnpm install
@@ -18,13 +18,16 @@ test:
 	cargo test --workspace
 	pnpm test
 
+test-e2e:
+	pnpm exec playwright test
+
 typecheck:
 	pnpm typecheck
 
 build:
 	pnpm build
 
-check: fmt-check lint test typecheck build
+check: fmt-check lint test typecheck build test-e2e
 
 clean:
 	cargo clean
