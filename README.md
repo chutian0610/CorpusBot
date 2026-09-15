@@ -2,7 +2,9 @@
 
 CorpusBot is a local-first knowledge-base engine that compiles Markdown sources into a maintained Wiki and answers questions with verifiable citations.
 
-The MVP implementation plan is in [docs/MVP_PLAN.md](docs/MVP_PLAN.md). Architecture decisions are in [docs/adr](docs/adr).
+The MVP implementation plan is in [docs/MVP_PLAN.md](docs/MVP_PLAN.md), acceptance evidence in
+[docs/MVP_ACCEPTANCE.md](docs/MVP_ACCEPTANCE.md), and the next scope in
+[docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md). Architecture decisions are in [docs/adr](docs/adr).
 
 ## Requirements
 
@@ -118,6 +120,17 @@ make check
 ```
 
 This runs Rust formatting and Clippy, Rust and frontend tests, the TypeScript check, and the production frontend build. `make fmt` formats both Rust and frontend sources.
+
+`make check` also runs the offline MVP CLI acceptance flow. To run it directly,
+use:
+
+```bash
+scripts/mvp-acceptance.sh
+```
+
+The script uses a deterministic local OpenAI-compatible provider, exercises all
+eight CLI commands, verifies a path/quote/revision citation, and writes
+`target/mvp-acceptance.json`.
 
 Continuous Integration runs the same checks on every pull request. To validate an OpenAI-compatible endpoint end to end, run:
 

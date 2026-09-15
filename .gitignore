@@ -16,6 +16,8 @@ src-tauri/gen/
 *.local
 .env
 .env.*
+__pycache__/
+*.py[cod]
 
 # Engine-private workspace state is always ignored in generated wikis.
 .wiki-db/

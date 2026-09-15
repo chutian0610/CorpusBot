@@ -726,6 +726,53 @@ Raft elects a leader before replicating log entries. A candidate needs a majorit
     }
 
     #[tokio::test]
+    async fn changed_source_creates_a_new_source_version() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        corpusbot_store::Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        let source = root.path().join("raft.md");
+        std::fs::write(&source, SOURCE)?;
+
+        let first = Ingestor::new(FakeLlmClient::new([ANALYSIS, DRAFTS]))
+            .ingest_file(&workspace, &source)
+            .await?;
+        let IngestResult::Committed {
+            source_page: first_source_page,
+            source_version_id: first_version_id,
+            ..
+        } = first
+        else {
+            panic!("first ingest should commit");
+        };
+        let original_source_page = workspace.read_page(&first_source_page)?;
+
+        std::fs::write(
+            &source,
+            format!("{SOURCE}\n\nA second revision adds commit semantics."),
+        )?;
+        let second = Ingestor::new(FakeLlmClient::new([ANALYSIS, DRAFTS]))
+            .ingest_file(&workspace, &source)
+            .await?;
+        let IngestResult::Committed {
+            source_page: second_source_page,
+            source_version_id: second_version_id,
+            ..
+        } = second
+        else {
+            panic!("changed source should create a new version");
+        };
+
+        assert_ne!(first_version_id, second_version_id);
+        assert_ne!(first_source_page, second_source_page);
+        assert_eq!(
+            workspace.read_page(&first_source_page)?,
+            original_source_page
+        );
+        assert!(root.path().join(&second_source_page).exists());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn dirty_workspace_blocks_before_llm_calls() -> Result<()> {
         let root = tempfile::tempdir()?;
         corpusbot_store::Workspace::init(root.path(), Template::Research)?;

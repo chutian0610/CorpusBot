@@ -1,4 +1,4 @@
-.PHONY: install fmt fmt-check lint test test-e2e typecheck build check clean
+.PHONY: install fmt fmt-check lint test test-e2e test-acceptance typecheck build check clean
 
 install:
 	pnpm install
@@ -21,13 +21,16 @@ test:
 test-e2e:
 	pnpm exec playwright test
 
+test-acceptance:
+	scripts/mvp-acceptance.sh
+
 typecheck:
 	pnpm typecheck
 
 build:
 	pnpm build
 
-check: fmt-check lint test typecheck build test-e2e
+check: fmt-check lint test typecheck build test-e2e test-acceptance
 
 clean:
 	cargo clean
