@@ -71,9 +71,9 @@ function snapshot(message: string): SnapshotRow {
   };
 }
 
-function status(): WorkspaceStatus {
+function status(root: string = ROOT): WorkspaceStatus {
   return {
-    root: ROOT,
+    root,
     template: 'research',
     headSnapshotId: state.history[0]?.snapshotId,
     dirtyPaths: [],
@@ -83,9 +83,9 @@ function status(): WorkspaceStatus {
   };
 }
 
-function summary(): WorkspaceSummary {
+function summary(root: string = ROOT): WorkspaceSummary {
   return {
-    root: ROOT,
+    root,
     template: 'research',
     headSnapshotId: state.history[0]?.snapshotId,
   };
@@ -211,7 +211,9 @@ export async function invokeBrowserCommand<T>(command: string, args: CommandArgs
       return summary() as T;
     }
     case 'open_workspace':
+      return summary(args.root as string) as T;
     case 'workspace_status':
+      return status(args.root as string) as T;
       return status() as T;
     case 'list_wiki_pages':
       return pages() as T;

@@ -16,10 +16,57 @@ import type {
 
 type ViewId = 'wiki' | 'chat' | 'lint' | 'history' | 'settings';
 
+const LAST_WORKSPACE_KEY = 'corpusbot.root';
+const RECENT_WORKSPACES_KEY = 'corpusbot.recentWorkspaces';
+const MAX_RECENT_WORKSPACES = 5;
+
+let workspaceOperationId = 0;
+let workspaceOperationQueue: Promise<void> = Promise.resolve();
+
+function enqueueWorkspaceOperation(operation: () => Promise<void>): Promise<void> {
+  const operationId = ++workspaceOperationId;
+  const task = workspaceOperationQueue.then(async () => {
+    if (operationId === workspaceOperationId) {
+      await operation();
+    }
+  });
+  workspaceOperationQueue = task.then(
+    () => {},
+    () => {},
+  );
+  return task;
+}
+
+function readLastWorkspace(): string {
+  return localStorage.getItem(LAST_WORKSPACE_KEY) ?? '';
+}
+
+function readRecentWorkspaces(): string[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(RECENT_WORKSPACES_KEY) ?? '[]');
+    if (!Array.isArray(value)) return [];
+    return value.filter((path): path is string => typeof path === 'string' && path !== '');
+  } catch {
+    return [];
+  }
+}
+
+function rememberWorkspace(root: string): string[] {
+  const recentWorkspaces = [root, ...readRecentWorkspaces().filter((path) => path !== root)].slice(
+    0,
+    MAX_RECENT_WORKSPACES,
+  );
+  localStorage.setItem(LAST_WORKSPACE_KEY, root);
+  localStorage.setItem(RECENT_WORKSPACES_KEY, JSON.stringify(recentWorkspaces));
+  return recentWorkspaces;
+}
+
 type WorkspaceState = {
   activeView: ViewId;
   root: string;
+  recentWorkspaces: string[];
   initialized: boolean;
+  lastWorkspaceRestored: boolean;
   loading: boolean;
   busyMessage: string;
   error?: string;
@@ -44,6 +91,8 @@ type WorkspaceState = {
   updateSettingsForm: (settings: Partial<SettingsInput>) => void;
   initialize: (root: string, template: TemplateId) => Promise<void>;
   open: (root: string) => Promise<void>;
+  restoreLastWorkspace: () => Promise<void>;
+  returnToWorkspaceSetup: () => void;
   refresh: () => Promise<void>;
   selectPage: (path: string) => Promise<void>;
   importMarkdown: (fileName: string, markdown: string) => Promise<void>;
@@ -58,8 +107,10 @@ type WorkspaceState = {
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   activeView: 'wiki',
-  root: localStorage.getItem('corpusbot.root') ?? '',
+  root: readLastWorkspace(),
+  recentWorkspaces: readRecentWorkspaces(),
   initialized: false,
+  lastWorkspaceRestored: false,
   loading: false,
   busyMessage: '',
   error: undefined,
@@ -82,32 +133,61 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   updateSettingsForm: (settings) =>
     set((state) => ({ settingsForm: { ...state.settingsForm, ...settings } })),
 
-  initialize: async (root, template) => {
-    set({ loading: true, error: undefined });
-    try {
-      const summary = await api.initWorkspace(root, template);
-      localStorage.setItem('corpusbot.root', root);
-      set({ root, summary });
-      await get().refresh();
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
-    } finally {
-      set({ loading: false });
-    }
+  initialize: (root, template) =>
+    enqueueWorkspaceOperation(async () => {
+      set({ loading: true, error: undefined });
+      try {
+        const summary = await api.initWorkspace(root, template);
+        set({ root, summary });
+        await get().refresh();
+        set({ recentWorkspaces: rememberWorkspace(root) });
+      } catch (error) {
+        set({ error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        set({ loading: false });
+      }
+    }),
+
+  open: (root) =>
+    enqueueWorkspaceOperation(async () => {
+      set({ loading: true, error: undefined });
+      try {
+        const summary = await api.openWorkspace(root);
+        set({ root, summary });
+        await get().refresh();
+        set({ recentWorkspaces: rememberWorkspace(root) });
+      } catch (error) {
+        set({ error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        set({ loading: false });
+      }
+    }),
+
+  restoreLastWorkspace: async () => {
+    if (get().lastWorkspaceRestored || get().initialized || get().loading) return;
+    const root = readLastWorkspace();
+    if (!root) return;
+
+    set({ lastWorkspaceRestored: true });
+    await get().open(root);
   },
 
-  open: async (root) => {
-    set({ loading: true, error: undefined });
-    try {
-      const summary = await api.openWorkspace(root);
-      localStorage.setItem('corpusbot.root', root);
-      set({ root, summary });
-      await get().refresh();
-    } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
-    } finally {
-      set({ loading: false });
-    }
+  returnToWorkspaceSetup: () => {
+    workspaceOperationId += 1;
+    set({
+      activeView: 'wiki',
+      initialized: false,
+      status: undefined,
+      summary: undefined,
+      pages: [],
+      selectedPath: undefined,
+      selectedPage: undefined,
+      answer: undefined,
+      lintReport: undefined,
+      snapshots: [],
+      selectedSnapshotId: undefined,
+      error: undefined,
+    });
   },
 
   refresh: async () => {

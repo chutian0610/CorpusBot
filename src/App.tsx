@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import {
   BookOpenText,
+  FolderOpen,
   History,
   MessagesSquare,
   RefreshCw,
@@ -356,7 +357,13 @@ export default function App() {
   const setActiveView = useWorkspaceStore((state) => state.setActiveView);
   const refresh = useWorkspaceStore((state) => state.refresh);
   const loadHistory = useWorkspaceStore((state) => state.loadHistory);
+  const restoreLastWorkspace = useWorkspaceStore((state) => state.restoreLastWorkspace);
+  const returnToWorkspaceSetup = useWorkspaceStore((state) => state.returnToWorkspaceSetup);
   const loading = useWorkspaceStore((state) => state.loading);
+
+  useEffect(() => {
+    void restoreLastWorkspace();
+  }, [restoreLastWorkspace]);
 
   if (!initialized) {
     return <WorkspaceSetup />;
@@ -375,6 +382,15 @@ export default function App() {
             {status?.headSnapshotId ?? 'no snapshot'}
           </span>
         </div>
+        <button
+          type="button"
+          aria-label="Change workspace"
+          className="flex size-9 items-center justify-center rounded-md hover:bg-stone-100"
+          title="Change workspace"
+          onClick={() => returnToWorkspaceSetup()}
+        >
+          <FolderOpen className="size-4" />
+        </button>
         <button
           type="button"
           aria-label="Refresh workspace"

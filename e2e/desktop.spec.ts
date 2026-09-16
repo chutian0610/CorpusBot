@@ -78,3 +78,22 @@ test('settings prompt for optional provider values instead of showing defaults',
     page.getByText('Leave Base URL and Model blank to use the built-in defaults.'),
   ).toBeVisible();
 });
+
+test('remembers the last workspace and recent workspace paths', async ({ page }) => {
+  const root = '/tmp/CorpusBot-remembered';
+  await page.goto('/?backend=browser');
+  await page.getByLabel('Workspace path').fill(root);
+  await page.getByRole('button', { name: 'Open' }).click();
+  await expect(page.getByText(root).first()).toBeVisible();
+  await expect(page.getByText('Clean')).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByText(root).first()).toBeVisible();
+  await expect(page.getByText('Clean')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'CorpusBot Workspace' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Change workspace' }).click();
+  await expect(page.getByRole('heading', { name: 'CorpusBot Workspace' })).toBeVisible();
+  await page.getByRole('button', { name: root }).click();
+  await expect(page.getByText('Clean')).toBeVisible();
+});
