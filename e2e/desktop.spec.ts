@@ -10,10 +10,10 @@ const IMPORT_FILE = {
 
 test('imports, reads, questions, lints, and restores a workspace', async ({ page }) => {
   await page.goto('/?backend=browser');
-  await expect(page.getByRole('heading', { name: 'CorpusBot Workspace' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Choose a workspace' })).toBeVisible();
 
   await page.getByLabel('Workspace path').fill('/tmp/CorpusBot-browser-e2e');
-  await page.getByRole('button', { name: 'Open' }).click();
+  await page.getByRole('button', { name: 'Open path' }).click();
   await expect(page.getByText('/tmp/CorpusBot-browser-e2e')).toBeVisible();
   await expect(page.getByText('Clean')).toBeVisible();
 
@@ -49,15 +49,15 @@ test('imports, reads, questions, lints, and restores a workspace', async ({ page
   await expect(page.getByText('Clean')).toBeVisible();
 });
 
-test('stays on setup with a clear error when desktop IPC is unavailable', async ({ page }) => {
+test('stays in the launcher when desktop IPC is unavailable', async ({ page }) => {
   await page.goto('/');
   await page.getByLabel('Workspace path').fill('/tmp/CorpusBot-unavailable');
-  await page.getByRole('button', { name: 'Open' }).click();
+  await page.getByRole('button', { name: 'Open path' }).click();
 
   await expect(page.getByRole('alert')).toContainText(
     'The CorpusBot desktop backend is only available in the app.',
   );
-  await expect(page.getByRole('heading', { name: 'CorpusBot Workspace' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Choose a workspace' })).toBeVisible();
 });
 
 test('settings prompt for optional provider values instead of showing defaults', async ({
@@ -65,7 +65,7 @@ test('settings prompt for optional provider values instead of showing defaults',
 }) => {
   await page.goto('/?backend=browser');
   await page.getByLabel('Workspace path').fill('/tmp/CorpusBot-browser-e2e');
-  await page.getByRole('button', { name: 'Open' }).click();
+  await page.getByRole('button', { name: 'Open path' }).click();
   await page.getByRole('button', { name: 'Settings' }).click();
 
   const baseUrl = page.getByLabel('Base URL');
@@ -79,21 +79,21 @@ test('settings prompt for optional provider values instead of showing defaults',
   ).toBeVisible();
 });
 
-test('remembers the last workspace and recent workspace paths', async ({ page }) => {
+test('lets the user choose between recent and new workspaces', async ({ page }) => {
   const root = '/tmp/CorpusBot-remembered';
   await page.goto('/?backend=browser');
   await page.getByLabel('Workspace path').fill(root);
-  await page.getByRole('button', { name: 'Open' }).click();
+  await page.getByRole('button', { name: 'Open path' }).click();
   await expect(page.getByText(root).first()).toBeVisible();
   await expect(page.getByText('Clean')).toBeVisible();
-
-  await page.reload();
-  await expect(page.getByText(root).first()).toBeVisible();
-  await expect(page.getByText('Clean')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'CorpusBot Workspace' })).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Change workspace' }).click();
-  await expect(page.getByRole('heading', { name: 'CorpusBot Workspace' })).toBeVisible();
-  await page.getByRole('button', { name: root }).click();
+  await expect(page.getByRole('heading', { name: 'Choose a workspace' })).toBeVisible();
+  await expect(page.getByText('Last opened')).toBeVisible();
+  await expect(page.getByText(root).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Create workspace' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Open' }).first().click();
+  await expect(page.getByText(root).first()).toBeVisible();
   await expect(page.getByText('Clean')).toBeVisible();
 });

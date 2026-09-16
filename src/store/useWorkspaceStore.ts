@@ -66,7 +66,6 @@ type WorkspaceState = {
   root: string;
   recentWorkspaces: string[];
   initialized: boolean;
-  lastWorkspaceRestored: boolean;
   loading: boolean;
   busyMessage: string;
   error?: string;
@@ -91,7 +90,6 @@ type WorkspaceState = {
   updateSettingsForm: (settings: Partial<SettingsInput>) => void;
   initialize: (root: string, template: TemplateId) => Promise<void>;
   open: (root: string) => Promise<void>;
-  restoreLastWorkspace: () => Promise<void>;
   returnToWorkspaceSetup: () => void;
   refresh: () => Promise<void>;
   selectPage: (path: string) => Promise<void>;
@@ -110,7 +108,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   root: readLastWorkspace(),
   recentWorkspaces: readRecentWorkspaces(),
   initialized: false,
-  lastWorkspaceRestored: false,
   loading: false,
   busyMessage: '',
   error: undefined,
@@ -162,15 +159,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({ loading: false });
       }
     }),
-
-  restoreLastWorkspace: async () => {
-    if (get().lastWorkspaceRestored || get().initialized || get().loading) return;
-    const root = readLastWorkspace();
-    if (!root) return;
-
-    set({ lastWorkspaceRestored: true });
-    await get().open(root);
-  },
 
   returnToWorkspaceSetup: () => {
     workspaceOperationId += 1;

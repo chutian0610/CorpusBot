@@ -357,13 +357,8 @@ export default function App() {
   const setActiveView = useWorkspaceStore((state) => state.setActiveView);
   const refresh = useWorkspaceStore((state) => state.refresh);
   const loadHistory = useWorkspaceStore((state) => state.loadHistory);
-  const restoreLastWorkspace = useWorkspaceStore((state) => state.restoreLastWorkspace);
   const returnToWorkspaceSetup = useWorkspaceStore((state) => state.returnToWorkspaceSetup);
   const loading = useWorkspaceStore((state) => state.loading);
-
-  useEffect(() => {
-    void restoreLastWorkspace();
-  }, [restoreLastWorkspace]);
 
   if (!initialized) {
     return <WorkspaceSetup />;
