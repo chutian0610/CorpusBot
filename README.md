@@ -56,15 +56,15 @@ cargo run -p corpusbot-cli -- restore --root /path/to/research-wiki --snapshot <
 
 ## LLM configuration
 
-The desktop Settings view writes an OpenAI-compatible configuration to the user-level CorpusBot config directory. The API key is stored privately and is not displayed again.
+The desktop Settings view is the runtime source of truth. It writes an
+OpenAI-compatible configuration to the user-level CorpusBot config directory.
+The API key is stored privately and is not displayed again. Environment
+variables do not override saved app settings at runtime.
 
-Environment variables take precedence over the saved settings:
-
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `CORPUSBOT_MODEL`
-
-The MVP uses Chat Completions-compatible endpoints and requires typed JSON responses.
+The MVP uses Chat Completions-compatible endpoints and requires typed JSON
+responses. Automation scripts may read provider environment variables only to
+seed an isolated temporary settings file; they do not turn those variables into
+runtime overrides.
 
 ## MVP citation evaluation
 

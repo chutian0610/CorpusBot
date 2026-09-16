@@ -423,19 +423,11 @@ mod tests {
             base_url: "https://example.com/v1".to_owned(),
             model: "mvp-mock".to_owned(),
             has_api_key: true,
-            base_url_source: "settings".to_owned(),
-            model_source: "settings".to_owned(),
-            api_key_source: Some("settings".to_owned()),
-            environment_overrides: vec![],
             git_author_name: Some("CorpusBot".to_owned()),
             git_author_email: Some("corpusbot@local.invalid".to_owned()),
         })?;
         assert_eq!(settings["baseUrl"], "https://example.com/v1");
         assert_eq!(settings["hasApiKey"], true);
-        assert_eq!(settings["baseUrlSource"], "settings");
-        assert_eq!(settings["modelSource"], "settings");
-        assert_eq!(settings["apiKeySource"], "settings");
-        assert_eq!(settings["environmentOverrides"], json!([]));
         assert_eq!(settings["gitAuthorName"], "CorpusBot");
 
         let input: SettingsInput = serde_json::from_value(json!({

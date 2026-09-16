@@ -45,12 +45,30 @@ if [[ ! -s "$PORT_FILE" ]]; then
   exit 1
 fi
 PORT="$(cat "$PORT_FILE")"
-export OPENAI_API_KEY="mvp-acceptance-local-key"
-export OPENAI_BASE_URL="http://127.0.0.1:$PORT/v1"
-export CORPUSBOT_MODEL="mvp-mock"
-
 cargo build -q -p corpusbot-cli
 CLI="$ROOT/target/debug/corpusbot"
+
+# Run the CLI with an isolated settings file; environment variables cannot
+# override CorpusBot settings at runtime.
+CONFIG_HOME="$ARTIFACTS/config-home"
+LINUX_CONFIG_DIR="$CONFIG_HOME/config/CorpusBot"
+MAC_CONFIG_DIR="$CONFIG_HOME/Library/Application Support/CorpusBot"
+mkdir -p "$LINUX_CONFIG_DIR" "$MAC_CONFIG_DIR"
+for settings_file in "$LINUX_CONFIG_DIR/settings.json" "$MAC_CONFIG_DIR/settings.json"; do
+  cat >"$settings_file" <<JSON
+{
+  "base_url": "http://127.0.0.1:$PORT/v1",
+  "model": "mvp-mock",
+  "api_key": "mvp-acceptance-local-key",
+  "git_author_name": "MVP Acceptance",
+  "git_author_email": "acceptance@corpusbot.invalid"
+}
+JSON
+  chmod 600 "$settings_file"
+done
+export HOME="$CONFIG_HOME"
+export XDG_CONFIG_HOME="$CONFIG_HOME/config"
+unset OPENAI_API_KEY OPENAI_BASE_URL CORPUSBOT_MODEL
 
 json_value() {
   python3 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"
