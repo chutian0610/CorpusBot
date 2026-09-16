@@ -17,14 +17,16 @@ export function WorkspaceSetup() {
   const earlierWorkspaces = recentWorkspaces.filter((workspace) => workspace !== lastWorkspace);
 
   return (
-    <div className="min-h-screen bg-paper text-ink">
-      <div className="mx-auto w-full max-w-6xl px-6 py-10 lg:px-10 lg:py-16">
-        <header className="max-w-3xl">
-          <p className="text-xs font-medium tracking-widest text-moss uppercase">
-            Local knowledge engine
-          </p>
-          <h1 className="mt-3 text-3xl font-semibold lg:text-4xl">Choose a workspace</h1>
-          <p className="mt-3 max-w-2xl text-sm leading-6 text-stone-600">
+    <div className="flex h-dvh overflow-hidden bg-paper text-ink">
+      <div className="mx-auto flex h-full w-full max-w-[1800px] flex-col px-6 py-5 lg:px-10">
+        <header className="flex shrink-0 flex-wrap items-end justify-between gap-4 border-b border-stone-200 pb-4">
+          <div>
+            <p className="text-xs font-medium tracking-widest text-moss uppercase">
+              Local knowledge engine
+            </p>
+            <h1 className="mt-2 text-2xl font-semibold lg:text-3xl">Choose a workspace</h1>
+          </div>
+          <p className="max-w-md text-sm leading-6 text-stone-600">
             Continue an existing research library, or create a dedicated workspace for a new
             subject.
           </p>
@@ -33,18 +35,18 @@ export function WorkspaceSetup() {
         {error ? (
           <div
             role="alert"
-            className="mt-8 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+            className="mt-4 shrink-0 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700"
           >
             {error}
           </div>
         ) : null}
 
-        <div className="mt-8 grid items-start gap-6 lg:grid-cols-[minmax(0, 1fr)_400px]">
+        <main className="mt-5 grid min-h-0 flex-1 gap-5 lg:grid-cols-[minmax(0, 1fr)_400px]">
           <section
             aria-labelledby="recent-workspaces-heading"
-            className="order-2 rounded-lg border border-stone-200 bg-white lg:order-1"
+            className="flex min-h-0 flex-col rounded-lg border border-stone-200 bg-white"
           >
-            <div className="border-b border-stone-200 p-5">
+            <div className="shrink-0 border-b border-stone-200 px-5 py-4">
               <h2
                 id="recent-workspaces-heading"
                 className="flex items-center gap-2 text-base font-semibold"
@@ -53,60 +55,64 @@ export function WorkspaceSetup() {
                 Recent workspaces
               </h2>
               <p className="mt-1 text-sm text-stone-500">
-                Choose a library to reopen. The most recent path appears first.
+                Reopen a research library. The most recent path appears first.
               </p>
             </div>
 
             {lastWorkspace ? (
-              <div className="p-5">
-                <div className="flex flex-col gap-3 rounded-md border border-moss/20 bg-moss/5 p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <p className="text-xs font-medium text-moss uppercase">Last opened</p>
-                    <p className="mt-1 truncate font-mono text-sm" title={lastWorkspace}>
-                      {lastWorkspace}
-                    </p>
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="shrink-0 border-b border-stone-200 bg-moss/5 px-5 py-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-moss uppercase">Last opened</p>
+                      <p className="mt-1 truncate font-mono text-sm" title={lastWorkspace}>
+                        {lastWorkspace}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={loading}
+                      onClick={() => void open(lastWorkspace)}
+                      className="inline-flex shrink-0 items-center justify-center gap-2 rounded-md bg-moss px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                    >
+                      Open
+                      <ArrowRight className="size-4" />
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    disabled={loading}
-                    onClick={() => void open(lastWorkspace)}
-                    className="inline-flex shrink-0 items-center justify-center gap-2 rounded-md bg-moss px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-                  >
-                    Open
-                    <ArrowRight className="size-4" />
-                  </button>
                 </div>
 
-                {earlierWorkspaces.length > 0 ? (
-                  <ul className="mt-5 divide-y divide-stone-200">
-                    {earlierWorkspaces.map((workspace, index) => (
-                      <li key={workspace}>
-                        <button
-                          type="button"
-                          disabled={loading}
-                          onClick={() => void open(workspace)}
-                          className="flex w-full items-center gap-4 py-3 text-left hover:bg-stone-50 disabled:opacity-50"
-                        >
-                          <span className="w-6 font-mono text-xs text-stone-400">
-                            {String(index + 1).padStart(2, '0')}
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate font-mono text-sm">{workspace}</span>
-                            <span className="mt-1 block text-xs text-stone-500">
-                              Open this workspace
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  {earlierWorkspaces.length > 0 ? (
+                    <ul className="divide-y divide-stone-200">
+                      {earlierWorkspaces.map((workspace, index) => (
+                        <li key={workspace}>
+                          <button
+                            type="button"
+                            disabled={loading}
+                            onClick={() => void open(workspace)}
+                            className="flex w-full items-center gap-4 px-5 py-3 text-left hover:bg-stone-50 disabled:opacity-50"
+                          >
+                            <span className="w-6 font-mono text-xs text-stone-400">
+                              {String(index + 1).padStart(2, '0')}
                             </span>
-                          </span>
-                          <ArrowRight className="size-4 shrink-0 text-stone-400" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="mt-4 text-sm text-stone-500">No earlier workspaces.</p>
-                )}
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate font-mono text-sm">{workspace}</span>
+                              <span className="mt-1 block text-xs text-stone-500">
+                                Open this workspace
+                              </span>
+                            </span>
+                            <ArrowRight className="size-4 shrink-0 text-stone-400" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="px-5 py-4 text-sm text-stone-500">No earlier workspaces.</p>
+                  )}
+                </div>
               </div>
             ) : (
-              <div className="p-5">
+              <div className="flex flex-1 items-center px-5">
                 <p className="text-sm text-stone-500">
                   No workspaces yet. Create your first workspace to get started.
                 </p>
@@ -116,9 +122,9 @@ export function WorkspaceSetup() {
 
           <section
             aria-labelledby="new-workspace-heading"
-            className="order-1 rounded-lg border border-stone-200 bg-white lg:order-2"
+            className="flex min-h-0 flex-col rounded-lg border border-stone-200 bg-white"
           >
-            <div className="border-b border-stone-200 p-5">
+            <div className="shrink-0 border-b border-stone-200 px-5 py-4">
               <h2
                 id="new-workspace-heading"
                 className="flex items-center gap-2 text-base font-semibold"
@@ -132,7 +138,7 @@ export function WorkspaceSetup() {
             </div>
 
             <form
-              className="space-y-5 p-5"
+              className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-4"
               onSubmit={(event) => {
                 event.preventDefault();
                 if (newRoot.trim()) void open(newRoot.trim());
@@ -175,7 +181,7 @@ export function WorkspaceSetup() {
                 </div>
               </fieldset>
 
-              <div className="flex flex-col gap-2">
+              <div className="mt-auto flex flex-col gap-2 pt-2">
                 <button
                   type="submit"
                   disabled={loading || !newRoot.trim()}
@@ -198,7 +204,7 @@ export function WorkspaceSetup() {
               </div>
             </form>
           </section>
-        </div>
+        </main>
       </div>
     </div>
   );
