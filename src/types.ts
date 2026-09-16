@@ -92,16 +92,16 @@ export type SnapshotResult = {
 };
 
 export type SettingsSummary = {
-  baseUrl: string;
-  model: string;
+  baseUrl?: string | null;
+  model?: string | null;
   hasApiKey: boolean;
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
 };
 
 export type SettingsInput = {
-  baseUrl: string;
-  model: string;
+  baseUrl?: string | null;
+  model?: string | null;
   apiKey?: string | null;
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;

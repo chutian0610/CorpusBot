@@ -295,19 +295,19 @@ function SettingsView() {
       <label className="block space-y-1 text-sm">
         <span className="font-medium">Base URL</span>
         <input
-          value={settingsForm.baseUrl}
+          value={settingsForm.baseUrl ?? ''}
           onChange={(event) => update({ baseUrl: event.target.value })}
+          placeholder="https://api.openai.com/v1"
           className="w-full rounded-md border px-3 py-2"
-          required
         />
       </label>
       <label className="block space-y-1 text-sm">
         <span className="font-medium">Model</span>
         <input
-          value={settingsForm.model}
+          value={settingsForm.model ?? ''}
           onChange={(event) => update({ model: event.target.value })}
+          placeholder="gpt-4o-mini"
           className="w-full rounded-md border px-3 py-2"
-          required
         />
       </label>
       <label className="block space-y-1 text-sm">
@@ -338,6 +338,9 @@ function SettingsView() {
           />
         </label>
       </div>
+      <p className="text-xs text-stone-500">
+        Leave Base URL and Model blank to use the built-in defaults.
+      </p>
       <button className="rounded-md bg-moss px-3 py-2 text-sm font-medium text-white">
         Save settings
       </button>

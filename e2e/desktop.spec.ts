@@ -59,3 +59,22 @@ test('stays on setup with a clear error when desktop IPC is unavailable', async 
   );
   await expect(page.getByRole('heading', { name: 'CorpusBot Workspace' })).toBeVisible();
 });
+
+test('settings prompt for optional provider values instead of showing defaults', async ({
+  page,
+}) => {
+  await page.goto('/?backend=browser');
+  await page.getByLabel('Workspace path').fill('/tmp/CorpusBot-browser-e2e');
+  await page.getByRole('button', { name: 'Open' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
+
+  const baseUrl = page.getByLabel('Base URL');
+  const model = page.getByLabel('Model');
+  await expect(baseUrl).toHaveValue('');
+  await expect(model).toHaveValue('');
+  await expect(baseUrl).toHaveAttribute('placeholder', 'https://api.openai.com/v1');
+  await expect(model).toHaveAttribute('placeholder', 'gpt-4o-mini');
+  await expect(
+    page.getByText('Leave Base URL and Model blank to use the built-in defaults.'),
+  ).toBeVisible();
+});

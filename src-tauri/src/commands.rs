@@ -420,13 +420,14 @@ mod tests {
     #[test]
     fn settings_contract_uses_camel_case() -> Result<(), serde_json::Error> {
         let settings = serde_json::to_value(SettingsSummary {
-            base_url: "https://example.com/v1".to_owned(),
-            model: "mvp-mock".to_owned(),
+            base_url: Some("https://example.com/v1".to_owned()),
+            model: Some("mvp-mock".to_owned()),
             has_api_key: true,
             git_author_name: Some("CorpusBot".to_owned()),
             git_author_email: Some("corpusbot@local.invalid".to_owned()),
         })?;
         assert_eq!(settings["baseUrl"], "https://example.com/v1");
+        assert_eq!(settings["model"], "mvp-mock");
         assert_eq!(settings["hasApiKey"], true);
         assert_eq!(settings["gitAuthorName"], "CorpusBot");
 
@@ -437,8 +438,13 @@ mod tests {
             "gitAuthorName": "CorpusBot",
             "gitAuthorEmail": "corpusbot@local.invalid"
         }))?;
-        assert_eq!(input.base_url, "https://example.com/v1");
+        assert_eq!(input.base_url.as_deref(), Some("https://example.com/v1"));
+        assert_eq!(input.model.as_deref(), Some("mvp-mock"));
         assert_eq!(input.git_author_name.as_deref(), Some("CorpusBot"));
+
+        let empty: SettingsInput = serde_json::from_value(json!({}))?;
+        assert_eq!(empty.base_url, None);
+        assert_eq!(empty.model, None);
         Ok(())
     }
 

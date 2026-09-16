@@ -24,8 +24,8 @@ struct SettingsFile {
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsSummary {
-    pub base_url: String,
-    pub model: String,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
     pub has_api_key: bool,
     pub git_author_name: Option<String>,
     pub git_author_email: Option<String>,
@@ -34,8 +34,8 @@ pub struct SettingsSummary {
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsInput {
-    pub base_url: String,
-    pub model: String,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
     pub api_key: Option<String>,
     pub git_author_name: Option<String>,
     pub git_author_email: Option<String>,
@@ -53,8 +53,8 @@ pub fn settings_path() -> Result<std::path::PathBuf> {
 pub fn load_settings() -> Result<SettingsSummary> {
     let file = read_settings()?;
     Ok(SettingsSummary {
-        base_url: file.base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
-        model: file.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+        base_url: file.base_url,
+        model: file.model,
         has_api_key: file.api_key.is_some_and(|key| !key.trim().is_empty()),
         git_author_name: file.git_author_name,
         git_author_email: file.git_author_email,
@@ -83,8 +83,14 @@ pub fn save_settings(input: SettingsInput) -> Result<SettingsSummary> {
         std::fs::create_dir_all(parent)?;
     }
     let mut file = read_settings()?;
-    file.base_url = Some(input.base_url.trim().to_owned());
-    file.model = Some(input.model.trim().to_owned());
+    file.base_url = input
+        .base_url
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    file.model = input
+        .model
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     if let Some(api_key) = input.api_key {
         file.api_key = if api_key.trim().is_empty() {
             None
@@ -100,13 +106,6 @@ pub fn save_settings(input: SettingsInput) -> Result<SettingsSummary> {
         .git_author_email
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
-
-    if file.base_url.as_deref().is_none_or(str::is_empty) {
-        return Err(AgentError::Configuration("base URL is empty".to_owned()));
-    }
-    if file.model.as_deref().is_none_or(str::is_empty) {
-        return Err(AgentError::Configuration("model is empty".to_owned()));
-    }
 
     let raw = serde_json::to_vec_pretty(&file)?;
     let mut tempfile = tempfile::NamedTempFile::new_in(

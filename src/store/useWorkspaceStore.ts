@@ -230,8 +230,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       set({
         settings,
         settingsForm: {
-          baseUrl: settings.baseUrl,
-          model: settings.model,
+          baseUrl: settings.baseUrl ?? '',
+          model: settings.model ?? '',
           apiKey: '',
           gitAuthorName: settings.gitAuthorName ?? '',
           gitAuthorEmail: settings.gitAuthorEmail ?? '',

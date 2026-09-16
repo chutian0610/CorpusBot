@@ -231,8 +231,8 @@ export async function invokeBrowserCommand<T>(command: string, args: CommandArgs
       return restore(args.snapshotId as string) as T;
     case 'get_settings': {
       const value: SettingsSummary = {
-        baseUrl: 'https://browser-e2e.invalid/v1',
-        model: 'browser-e2e-model',
+        baseUrl: null,
+        model: null,
         hasApiKey: false,
         gitAuthorName: 'CorpusBot E2E',
         gitAuthorEmail: 'e2e@corpusbot.invalid',
@@ -240,7 +240,7 @@ export async function invokeBrowserCommand<T>(command: string, args: CommandArgs
       return value as T;
     }
     case 'save_settings':
-      return args.settings as SettingsSummary as T;
+      return args.settings as T;
     default:
       throw new Error(`browser backend does not support command: ${command}`);
   }
