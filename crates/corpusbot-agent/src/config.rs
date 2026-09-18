@@ -1,9 +1,11 @@
 use crate::error::{AgentError, Result};
+use rusqlite::Connection;
+use rusqlite::OptionalExtension;
+use time::OffsetDateTime;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
-pub const CONFIG_FILE_NAME: &str = "provider.json";
-pub const SETTINGS_FILE_NAME: &str = "settings.json";
+pub const DAEMON_DB_FILE_NAME: &str = "daemon.db";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderConfig {
@@ -12,8 +14,8 @@ pub struct ProviderConfig {
     pub model: String,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-struct SettingsFile {
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SettingsRecord {
     base_url: Option<String>,
     model: Option<String>,
     api_key: Option<String>,
@@ -41,24 +43,10 @@ pub struct SettingsInput {
     pub git_author_email: Option<String>,
 }
 
-pub fn settings_path() -> Result<std::path::PathBuf> {
-    let Some(config_dir) = dirs::config_dir() else {
-        return Err(AgentError::Configuration(
-            "user configuration directory is unavailable".to_owned(),
-        ));
-    };
-    Ok(config_dir.join("CorpusBot").join(SETTINGS_FILE_NAME))
-}
-
 pub fn load_settings() -> Result<SettingsSummary> {
-    let file = read_settings()?;
-    Ok(SettingsSummary {
-        base_url: file.base_url,
-        model: file.model,
-        has_api_key: file.api_key.is_some_and(|key| !key.trim().is_empty()),
-        git_author_name: file.git_author_name,
-        git_author_email: file.git_author_email,
-    })
+    let database = daemon_db_path()?;
+    let record = load_settings_at(&database)?;
+    Ok(settings_summary(&record))
 }
 
 pub fn git_identity() -> Result<Option<(String, String)>> {
@@ -78,98 +66,119 @@ pub fn git_identity() -> Result<Option<(String, String)>> {
 }
 
 pub fn save_settings(input: SettingsInput) -> Result<SettingsSummary> {
-    let path = settings_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = read_settings()?;
-    file.base_url = input
+    let database = daemon_db_path()?;
+    save_settings_at(&database, input)
+}
+
+pub(crate) fn load_settings_at(database_path: &std::path::Path) -> Result<SettingsRecord> {
+    let connection = open_daemon_database(database_path)?;
+    let record = read_settings_record(&connection)?;
+    Ok(record.unwrap_or_default())
+}
+
+pub(crate) fn save_settings_at(
+    database_path: &std::path::Path,
+    input: SettingsInput,
+) -> Result<SettingsSummary> {
+    let connection = open_daemon_database(database_path)?;
+    let existing = read_settings_record(&connection)?;
+    let mut record = existing.unwrap_or_default();
+
+    record.base_url = input
         .base_url
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
-    file.model = input
+    record.model = input
         .model
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
     if let Some(api_key) = input.api_key {
-        file.api_key = if api_key.trim().is_empty() {
+        record.api_key = if api_key.trim().is_empty() {
             None
         } else {
             Some(api_key.trim().to_owned())
         };
     }
-    file.git_author_name = input
+    record.git_author_name = input
         .git_author_name
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
-    file.git_author_email = input
+    record.git_author_email = input
         .git_author_email
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
 
-    let raw = serde_json::to_vec_pretty(&file)?;
-    let mut tempfile = tempfile::NamedTempFile::new_in(
-        path.parent()
-            .ok_or_else(|| AgentError::Configuration("invalid settings path".to_owned()))?,
+    let updated_at = OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|_error| AgentError::ConfigurationSource(std::fmt::Error))?;
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute(
+        "INSERT INTO app_settings(
+                id, base_url, model, api_key, git_author_name, git_author_email, updated_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+               base_url = excluded.base_url,
+               model = excluded.model,
+               api_key = excluded.api_key,
+               git_author_name = excluded.git_author_name,
+               git_author_email = excluded.git_author_email,
+               updated_at = excluded.updated_at",
+        rusqlite::params![
+            record.base_url,
+            record.model,
+            record.api_key,
+            record.git_author_name,
+            record.git_author_email,
+            updated_at
+        ],
     )?;
-    use std::io::Write;
-    tempfile.write_all(&raw)?;
-    tempfile.as_file().sync_all()?;
-    tempfile.persist(&path)?;
+    transaction.commit()?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&path)?.permissions();
-        permissions.set_mode(0o600);
-        std::fs::set_permissions(&path, permissions)?;
-    }
-
-    load_settings()
-}
-
-fn read_settings() -> Result<SettingsFile> {
-    let path = settings_path()?;
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SettingsFile::default());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    serde_json::from_str(&raw).map_err(Into::into)
+    Ok(settings_summary(&record))
 }
 
 pub fn provider_config() -> Result<ProviderConfig> {
-    let file = read_settings()?;
-    let base_url = file.base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
-    let api_key = file.api_key.unwrap_or_default();
-    let model = file.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+    let database = daemon_db_path()?;
+    let record = load_settings_at(&database)?;
+    let base_url = record
+        .base_url
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+    let api_key = record.api_key.unwrap_or_default();
+    let model = record.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+    ProviderConfig::new(base_url, api_key, model)
+}
+
+pub fn provider_config_for_settings(input: &SettingsInput) -> Result<ProviderConfig> {
+    let database = daemon_db_path()?;
+    let record = load_settings_at(&database)?;
+    let non_empty = |value: Option<&String>| -> Option<String> {
+        value
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let base_url = non_empty(input.base_url.as_ref())
+        .or(record.base_url)
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+    let api_key = non_empty(input.api_key.as_ref())
+        .or(record.api_key)
+        .unwrap_or_default();
+    let model = non_empty(input.model.as_ref())
+        .or(record.model)
+        .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
     ProviderConfig::new(base_url, api_key, model)
 }
 
 impl ProviderConfig {
     pub fn load() -> Result<Self> {
-        let file = Self::from_config_file()?;
-        let base_url = file.base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
-        let api_key = file.api_key.unwrap_or_default();
-        let model = file.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let database = daemon_db_path()?;
+        let record = load_settings_at(&database)?;
+        let base_url = record
+            .base_url
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+        let api_key = record.api_key.unwrap_or_default();
+        let model = record.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
         Self::new(base_url, api_key, model)
-    }
-
-    fn from_config_file() -> Result<ProviderFileConfig> {
-        let Some(config_dir) = dirs::config_dir() else {
-            return Ok(ProviderFileConfig::default());
-        };
-        let path = config_dir.join("CorpusBot").join(CONFIG_FILE_NAME);
-        let raw = match std::fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(ProviderFileConfig::default());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        serde_json::from_str(&raw).map_err(Into::into)
     }
 
     pub fn new(
@@ -201,11 +210,83 @@ fn normalize_base_url(mut value: String) -> String {
     value
 }
 
-#[derive(Default, serde::Deserialize)]
-struct ProviderFileConfig {
-    base_url: Option<String>,
-    api_key: Option<String>,
-    model: Option<String>,
+pub(crate) fn daemon_db_path() -> Result<std::path::PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Err(AgentError::Configuration(
+            "home directory is unavailable".to_owned(),
+        ));
+    };
+    Ok(home.join(".corpusbot").join(DAEMON_DB_FILE_NAME))
+}
+
+fn settings_summary(record: &SettingsRecord) -> SettingsSummary {
+    SettingsSummary {
+        base_url: record.base_url.clone(),
+        model: record.model.clone(),
+        has_api_key: record
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty()),
+        git_author_name: record.git_author_name.clone(),
+        git_author_email: record.git_author_email.clone(),
+    }
+}
+
+fn open_daemon_database(path: &std::path::Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(parent)?.permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(parent, permissions)?;
+        }
+    }
+
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(std::time::Duration::from_millis(5_000))?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS app_settings (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          base_url TEXT,
+          model TEXT,
+          api_key TEXT,
+          git_author_name TEXT,
+          git_author_email TEXT,
+          updated_at TEXT NOT NULL
+        )",
+    )?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(path, permissions)?;
+    }
+
+    Ok(connection)
+}
+
+fn read_settings_record(connection: &Connection) -> Result<Option<SettingsRecord>> {
+    let record = connection
+        .query_row(
+            "SELECT base_url, model, api_key, git_author_name, git_author_email
+             FROM app_settings WHERE id = 1",
+            [],
+            |row| {
+                Ok(SettingsRecord {
+                    base_url: row.get(0)?,
+                    model: row.get(1)?,
+                    api_key: row.get(2)?,
+                    git_author_name: row.get(3)?,
+                    git_author_email: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(record)
 }
 
 #[cfg(test)]
@@ -219,6 +300,45 @@ mod tests {
         assert_eq!(config.api_key, "secret");
         assert_eq!(config.model, "model");
         assert!(ProviderConfig::new("https://example.com", "", "model").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn saves_loads_and_updates_daemon_settings() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let database = directory.path().join("daemon.db");
+
+        let initial = load_settings_at(&database)?;
+        assert_eq!(initial.base_url, None);
+        assert!(!settings_summary(&initial).has_api_key);
+
+        let saved = save_settings_at(
+            &database,
+            SettingsInput {
+                base_url: Some(" https://example.com/v1/ ".to_owned()),
+                model: Some(" test-model ".to_owned()),
+                api_key: Some(" secret ".to_owned()),
+                git_author_name: Some(" Test User ".to_owned()),
+                git_author_email: Some(" test@example.com ".to_owned()),
+            },
+        )?;
+        assert!(saved.has_api_key);
+        assert_eq!(saved.git_author_name.as_deref(), Some("Test User"));
+
+        let updated = save_settings_at(
+            &database,
+            SettingsInput {
+                base_url: None,
+                model: None,
+                api_key: Some(String::new()),
+                git_author_name: None,
+                git_author_email: None,
+            },
+        )?;
+        assert_eq!(updated.base_url, None);
+        assert_eq!(updated.model, None);
+        assert!(!updated.has_api_key);
+        assert_eq!(updated.git_author_name, None);
         Ok(())
     }
 }

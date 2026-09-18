@@ -35,6 +35,15 @@ pub struct LlmResponse {
     pub response_id: Option<String>,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionTestResult {
+    pub provider: String,
+    pub model: String,
+    pub latency_ms: u64,
+    pub response_id: Option<String>,
+}
+
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse>;
@@ -64,6 +73,28 @@ impl RigLlmClient {
             model,
             provider: "openai-compatible".to_owned(),
             model_name,
+        })
+    }
+
+    pub async fn test_connection(&self) -> Result<ConnectionTestResult> {
+        let started_at = std::time::Instant::now();
+        let request = async {
+            CompletionRequestBuilder::new(self.model.clone(), "Reply with OK.".to_owned())
+                .max_tokens_opt(Some(1))
+                .send()
+                .await
+        };
+        let response = match tokio::time::timeout(std::time::Duration::from_secs(15), request).await
+        {
+            Ok(response) => response?,
+            Err(_) => return Err(AgentError::Timeout { timeout_ms: 15_000 }),
+        };
+
+        Ok(ConnectionTestResult {
+            provider: self.provider.clone(),
+            model: self.model_name.clone(),
+            latency_ms: started_at.elapsed().as_millis() as u64,
+            response_id: response.response_id,
         })
     }
 }

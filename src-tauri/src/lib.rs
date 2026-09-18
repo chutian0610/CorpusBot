@@ -1,11 +1,13 @@
 mod commands;
 mod error;
 mod health;
+pub mod local_server;
 
 use commands::{
-    create_snapshot, get_settings, ingest_content, init_workspace, list_snapshots, list_wiki_pages,
-    open_workspace, query, read_wiki_page, restore_snapshot, run_lint, save_settings,
-    workspace_status,
+    IngestJobStore, create_snapshot, get_ingest_job, get_settings, init_workspace, list_documents,
+    list_ingest_runs, list_snapshots, list_wiki_pages, open_workspace, query, read_ingest_run,
+    read_raw_source, read_wiki_page, restore_snapshot, run_lint, save_settings,
+    start_ingest_content, test_llm_connection, workspace_status,
 };
 use health::health_payload;
 
@@ -16,6 +18,8 @@ fn health() -> serde_json::Value {
 
 pub fn run() {
     if let Err(error) = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(IngestJobStore::default())
         .invoke_handler(tauri::generate_handler![health])
         .invoke_handler(tauri::generate_handler![
             health,
@@ -24,7 +28,12 @@ pub fn run() {
             workspace_status,
             list_wiki_pages,
             read_wiki_page,
-            ingest_content,
+            read_raw_source,
+            start_ingest_content,
+            get_ingest_job,
+            list_ingest_runs,
+            read_ingest_run,
+            list_documents,
             query,
             run_lint,
             create_snapshot,
@@ -32,6 +41,7 @@ pub fn run() {
             restore_snapshot,
             get_settings,
             save_settings,
+            test_llm_connection,
         ])
         .run(tauri::generate_context!())
     {

@@ -1,4 +1,13 @@
-.PHONY: install fmt fmt-check lint test test-e2e test-acceptance typecheck build check clean
+.PHONY: install dev-local dev-tauri fmt fmt-check lint test test-e2e test-acceptance typecheck build check clean
+
+dev-local:
+	@cargo run --bin corpusbot-server & server_pid=$$!; \
+	trap 'kill $$server_pid 2>/dev/null' EXIT; \
+	pnpm dev:web:local; status=$$?; \
+	exit $$status
+
+dev-tauri:
+	@pnpm exec tauri dev
 
 install:
 	pnpm install

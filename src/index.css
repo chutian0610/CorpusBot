@@ -5,3 +5,7 @@
   --color-paper: #f7f5f1;
   --color-moss: #206b58;
 }
+
+dialog::backdrop {
+  background: rgb(23 33 43 / 0.28);
+}

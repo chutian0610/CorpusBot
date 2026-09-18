@@ -29,27 +29,47 @@ cargo build -q -p corpusbot-cli
 CLI="$ROOT/target/debug/corpusbot"
 
 # Environment values seed an isolated config; they do not override app settings.
-CONFIG_HOME="$ARTIFACTS/config-home"
-mkdir -p "$CONFIG_HOME/config/CorpusBot" "$CONFIG_HOME/Library/Application Support/CorpusBot"
-for config_root in "$CONFIG_HOME/config/CorpusBot" "$CONFIG_HOME/Library/Application Support/CorpusBot"; do
-  python3 - "$config_root/settings.json" <<'PY'
-import json
+CONFIG_DB="$ARTIFACTS/daemon.db"
+export CORPUSBOT_DAEMON_DB="$CONFIG_DB"
+mkdir -p "$(dirname "$CONFIG_DB")"
+python3 - "$CONFIG_DB" <<'PY'
 import os
 import pathlib
+import sqlite3
 import sys
 
-path = pathlib.Path(sys.argv[1])
-settings = {
-    "base_url": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-    "model": os.environ.get("CORPUSBOT_MODEL", "gpt-4o-mini"),
-    "api_key": os.environ["OPENAI_API_KEY"],
-}
-path.write_text(json.dumps(settings, indent=2) + "\n")
-path.chmod(0o600)
+database = pathlib.Path(sys.argv[1])
+database.parent.mkdir(parents=True, exist_ok=True)
+connection = sqlite3.connect(database)
+connection.execute(
+    """
+    CREATE TABLE IF NOT EXISTS app_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      base_url TEXT,
+      model TEXT,
+      api_key TEXT,
+      git_author_name TEXT,
+      git_author_email TEXT,
+      updated_at TEXT NOT NULL
+    )
+    """
+)
+connection.execute(
+    """
+    INSERT OR REPLACE INTO app_settings (
+      id, base_url, model, api_key, git_author_name, git_author_email, updated_at
+    ) VALUES (1, ?, ?, ?, NULL, NULL, datetime('now'))
+    """,
+    (
+        os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        os.environ.get("CORPUSBOT_MODEL", "gpt-4o-mini"),
+        os.environ["OPENAI_API_KEY"],
+    ),
+)
+connection.commit()
+connection.close()
+database.chmod(0o600)
 PY
-done
-export HOME="$CONFIG_HOME"
-export XDG_CONFIG_HOME="$CONFIG_HOME/config"
 unset OPENAI_API_KEY OPENAI_BASE_URL CORPUSBOT_MODEL
 
 for source in "${sources[@]}"; do

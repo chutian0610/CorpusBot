@@ -5,7 +5,7 @@ pub mod workspace;
 
 pub use error::{Result, StoreError};
 pub use lock::{LockOwner, WorkspaceLock};
-pub use metadata::{Metadata, PageRow, SourceRow};
+pub use metadata::{IngestRunRow, Metadata, PageRow, SourceRow, TouchedResource};
 pub use workspace::{
     GitIdentity, IngestCommitRequest, IngestCommitResult, PageFile, SnapshotResult, SnapshotRow,
     Workspace, WorkspacePaths, WorkspaceStatus, WorkspaceSummary,

@@ -19,13 +19,75 @@ pnpm install
 pnpm dev
 ```
 
-The Vite dev server listens on <http://127.0.0.1:1420>. Run the desktop shell with:
+The Vite dev server listens on <http://127.0.0.1:1420>. By itself it is the
+frontend only; use one of the backend modes below.
+
+### Desktop shell
+
+Run the desktop shell with:
 
 ```bash
 pnpm tauri dev
 ```
 
-## MVP workflow
+Or use the equivalent Make target:
+
+```bash
+make dev-tauri
+```
+
+### Browser UI with the real backend
+
+Start the Rust HTTP backend and the Vite frontend together:
+
+```bash
+make dev-local
+```
+
+Then open:
+
+```text
+http://127.0.0.1:1420
+```
+
+You can also run them in separate terminals:
+
+```bash
+pnpm dev:server
+pnpm dev:web:local
+```
+
+`pnpm dev:web:local` selects Vite mode `local-backend`. Alternatively, set
+`VITE_CORPUSBOT_BACKEND=local` in `.env.local`.
+
+The local backend listens only on `127.0.0.1:1421`; Vite proxies `/api` to it.
+This mode uses the same workspace storage and commands as Tauri, but the browser
+cannot open the macOS directory picker. Use the workspace-path dialog instead.
+The old `?backend=browser` fixture has been removed.
+
+## Desktop UI workflow
+
+The desktop shell has five primary views:
+
+- **Wiki**: browse generated pages in a list and read formatted metadata beside
+  the page body.
+- **Documents**: browse imported source pages in an editor-style folder tree and
+  inspect the entity/concept pages extracted from each document.
+- **Ingest**: import Markdown and inspect run history, affected resources, the
+  original source, generated source pages, and workflow events.
+- **Health**: run deterministic checks and report content-page/error/warning
+  counts. Generated `wiki/index.md` and `wiki/log.md` are excluded from the
+  content-page count.
+- **History**: inspect snapshots and restore after confirmation.
+
+The workspace launcher remembers recent paths locally. Deleting a launcher
+entry removes only that history item, not the underlying workspace.
+
+Ingest runs as a background job on the desktop and local-server modes. The job
+status is held by the running process; restart recovery of queued UI jobs is not
+implemented. Committed ingest runs remain durable in workspace storage.
+
+## CLI workflow
 
 Create a fresh research workspace:
 
@@ -57,9 +119,9 @@ cargo run -p corpusbot-cli -- restore --root /path/to/research-wiki --snapshot <
 ## LLM configuration
 
 The desktop Settings view is the runtime source of truth. It writes an
-OpenAI-compatible configuration to the user-level CorpusBot config directory.
-The API key is stored privately and is not displayed again. Environment
-variables do not override saved app settings at runtime.
+OpenAI-compatible configuration to the app-level SQLite database at
+`~/.corpusbot/daemon.db`. The API key is stored privately and is not displayed
+again. Environment variables do not override saved app settings at runtime.
 
 The MVP uses Chat Completions-compatible endpoints and requires typed JSON
 responses. Automation scripts may read provider environment variables only to
@@ -85,16 +147,20 @@ The runner creates a temporary workspace, ingests every source in
 workspace for debugging, `WORKSPACE` to reuse a path, `REPORT` to move the
 report, and `MIN_PASS_RATE` to change the acceptance threshold.
 
-## Desktop browser E2E
+## Desktop E2E
 
-The desktop interface has a browser-only backend that is enabled only by opening:
+The E2E suite starts a real local backend and the Vite frontend. The backend is
+launched with `CORPUSBOT_E2E_LLM=1`, which enables a deterministic fake provider;
+it never calls a model provider. Playwright starts both services automatically.
+For manual inspection while the suite is running, the UI is served at:
 
 ```text
-http://127.0.0.1:1420/?backend=browser
+http://127.0.0.1:1420
 ```
 
-It provides deterministic workspace data so Playwright can exercise the React
-interface without starting a Tauri process or calling a real provider:
+It provides a real workspace, storage, HTTP backend, and deterministic LLM
+responses so Playwright can exercise the React interface without starting a
+Tauri process or calling a real provider:
 
 ```bash
 pnpm exec playwright install chromium
@@ -102,11 +168,13 @@ pnpm test:e2e
 ```
 
 The E2E flow opens a workspace, reads a page, imports Markdown, asks a cited
-question, checks the Lint report, and restores a snapshot.
+question, checks Documents and the Lint report, and restores a snapshot.
 
 ## Current MVP limitations
 
 - Ingest is serial and Markdown-only; PDF/EPUB/HTML import is not implemented.
+- Ingest job status is process-local; queued or running jobs are not resumed
+  after an app/server restart.
 - Ingest rebuilds the Tantivy generation rather than performing segment-level incremental updates.
 - Snapshot restore immediately rebuilds the Tantivy generation rather than performing segment-level incremental updates.
 - Interrupted Ingest and Restore runs reconcile automatically on the next open; broader fault-injection hardening remains future work.

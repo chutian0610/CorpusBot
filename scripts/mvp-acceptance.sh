@@ -48,26 +48,50 @@ PORT="$(cat "$PORT_FILE")"
 cargo build -q -p corpusbot-cli
 CLI="$ROOT/target/debug/corpusbot"
 
-# Run the CLI with an isolated settings file; environment variables cannot
-# override CorpusBot settings at runtime.
-CONFIG_HOME="$ARTIFACTS/config-home"
-LINUX_CONFIG_DIR="$CONFIG_HOME/config/CorpusBot"
-MAC_CONFIG_DIR="$CONFIG_HOME/Library/Application Support/CorpusBot"
-mkdir -p "$LINUX_CONFIG_DIR" "$MAC_CONFIG_DIR"
-for settings_file in "$LINUX_CONFIG_DIR/settings.json" "$MAC_CONFIG_DIR/settings.json"; do
-  cat >"$settings_file" <<JSON
-{
-  "base_url": "http://127.0.0.1:$PORT/v1",
-  "model": "mvp-mock",
-  "api_key": "mvp-acceptance-local-key",
-  "git_author_name": "MVP Acceptance",
-  "git_author_email": "acceptance@corpusbot.invalid"
-}
-JSON
-  chmod 600 "$settings_file"
-done
-export HOME="$CONFIG_HOME"
-export XDG_CONFIG_HOME="$CONFIG_HOME/config"
+# Run the CLI with an isolated app-level SQLite database.
+CONFIG_DB="$ARTIFACTS/daemon.db"
+export CORPUSBOT_DAEMON_DB="$CONFIG_DB"
+mkdir -p "$(dirname "$CONFIG_DB")"
+python3 - "$CONFIG_DB" "$PORT" <<'PY'
+import pathlib
+import sqlite3
+import sys
+
+database = pathlib.Path(sys.argv[1])
+port = sys.argv[2]
+database.parent.mkdir(parents=True, exist_ok=True)
+connection = sqlite3.connect(database)
+connection.execute(
+    """
+    CREATE TABLE IF NOT EXISTS app_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      base_url TEXT,
+      model TEXT,
+      api_key TEXT,
+      git_author_name TEXT,
+      git_author_email TEXT,
+      updated_at TEXT NOT NULL
+    )
+    """
+)
+connection.execute(
+    """
+    INSERT OR REPLACE INTO app_settings (
+      id, base_url, model, api_key, git_author_name, git_author_email, updated_at
+    ) VALUES (1, ?, ?, ?, ?, ?, datetime('now'))
+    """,
+    (
+        f"http://127.0.0.1:{port}/v1",
+        "mvp-mock",
+        "mvp-acceptance-local-key",
+        "MVP Acceptance",
+        "acceptance@corpusbot.invalid",
+    ),
+)
+connection.commit()
+connection.close()
+database.chmod(0o600)
+PY
 unset OPENAI_API_KEY OPENAI_BASE_URL CORPUSBOT_MODEL
 
 json_value() {

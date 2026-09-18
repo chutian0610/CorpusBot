@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::Path;
 
 use corpusbot_agent::{DraftPlan, LlmClient, SourceAgent};
@@ -57,17 +56,10 @@ where
         original_name: &str,
         markdown: &str,
     ) -> Result<IngestResult> {
-        let extension = Path::new(original_name)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("md");
-        let mut temporary = tempfile::Builder::new()
-            .prefix("corpusbot-import-")
-            .suffix(&format!(".{extension}"))
-            .tempfile()?;
-        std::io::Write::write_all(&mut temporary, markdown.as_bytes())?;
-        temporary.flush()?;
-        let result = self.ingest_file(workspace, temporary.path()).await?;
+        let temporary = tempfile::tempdir()?;
+        let temporary_source = temporary.path().join(original_name);
+        std::fs::write(&temporary_source, markdown)?;
+        let result = self.ingest_file(workspace, &temporary_source).await?;
         temporary.close()?;
         Ok(result)
     }
@@ -176,6 +168,8 @@ where
         let mut touched = vec![ResourceRevision::absent(ResourceId::new(&raw_path)?)];
         let mut created = vec![source_page.clone()];
         let mut updated = Vec::new();
+        files.insert(raw_path.clone(), markdown.clone().into_bytes());
+        created.push(raw_path.clone());
         files.insert(source_page.clone(), source_markdown.clone().into_bytes());
         pages.push(PageFile {
             path: source_page.clone(),
@@ -715,8 +709,14 @@ Raft elects a leader before replicating log entries. A candidate needs a majorit
             panic!("expected committed result");
         };
         assert!(source_page.starts_with("wiki/sources/ver_"));
-        assert_eq!(created_paths.len(), 3);
+        assert_eq!(created_paths.len(), 4);
         assert!(root.path().join(&source_page).exists());
+        let raw_path = format!("raw/{}/raft.md", hex(SOURCE.as_bytes()));
+        assert!(root.path().join(&raw_path).exists());
+        assert_eq!(
+            std::fs::read(root.path().join(&raw_path))?,
+            SOURCE.as_bytes()
+        );
         assert!(
             root.path()
                 .join("wiki/concepts/leader-election.md")

@@ -184,7 +184,10 @@ fn run_lint_pages(
         template: template.as_str().to_owned(),
         revision_manifest_id: revision_manifest_id.into(),
         summary: LintSummary {
-            pages: raw_pages.len(),
+            pages: parsed
+                .iter()
+                .filter(|page| !is_reserved_page(&page.path))
+                .count(),
             errors,
             warnings,
         },
@@ -481,7 +484,7 @@ sources: []
             index_page(&["wiki/entities/Raft.md", "wiki/sources/RaftSource.md"]),
         ];
         let report = run_lint_pages(&pages, Template::Research, "manifest")?;
-        assert_eq!(report.summary.pages, 3);
+        assert_eq!(report.summary.pages, 2);
         assert_eq!(report.summary.errors, 0);
         assert_eq!(report.summary.warnings, 0);
         Ok(())
@@ -510,6 +513,17 @@ sources: []
         assert!(codes.contains("INVALID_DATE"));
         assert!(codes.contains("INDEX_DRIFT"));
         assert!(report.summary.errors > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_pages_are_not_counted_as_content_pages() -> Result<()> {
+        let report = run_lint_pages(
+            &[index_page(&["wiki/index.md", "wiki/log.md"])],
+            Template::Research,
+            "manifest",
+        )?;
+        assert_eq!(report.summary.pages, 0);
         Ok(())
     }
 

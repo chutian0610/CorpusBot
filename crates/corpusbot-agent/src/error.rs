@@ -27,6 +27,8 @@ pub enum AgentError {
     #[error(transparent)]
     Core(#[from] corpusbot_core::CoreError),
     #[error(transparent)]
+    Database(#[from] rusqlite::Error),
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Rig(#[from] rig_core::completion::CompletionError),
