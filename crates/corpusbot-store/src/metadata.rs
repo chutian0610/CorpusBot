@@ -8,6 +8,7 @@ pub struct Metadata {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PageRow {
     pub path: String,
     pub title: String,
@@ -24,6 +25,31 @@ pub struct SourceRow {
     pub original_name: String,
     pub size: u64,
     pub imported_at: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TouchedResource {
+    pub path: String,
+    pub revision_kind: String,
+    pub sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestRunRow {
+    pub run_id: String,
+    pub source_id: String,
+    pub status: String,
+    pub baseline_snapshot_id: String,
+    pub baseline_manifest_id: String,
+    pub touched_resources: Vec<TouchedResource>,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+    pub original_name: Option<String>,
+    pub source_version_id: Option<String>,
+    pub sha256: Option<String>,
+    pub size: Option<u64>,
 }
 
 impl Metadata {
@@ -178,6 +204,26 @@ impl Metadata {
         )?;
         let source = statement
             .query_row(rusqlite::params![sha256], |row| {
+                Ok(SourceRow {
+                    source_id: row.get(0)?,
+                    source_version_id: row.get(1)?,
+                    sha256: row.get(2)?,
+                    original_name: row.get(3)?,
+                    size: row.get(4)?,
+                    imported_at: row.get(5)?,
+                })
+            })
+            .optional()?;
+        Ok(source)
+    }
+
+    pub fn source_by_version_id(&self, source_version_id: &str) -> Result<Option<SourceRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT source_id, source_version_id, sha256, original_name, size, imported_at
+             FROM sources WHERE source_version_id = ?1",
+        )?;
+        let source = statement
+            .query_row(rusqlite::params![source_version_id], |row| {
                 Ok(SourceRow {
                     source_id: row.get(0)?,
                     source_version_id: row.get(1)?,
@@ -406,6 +452,67 @@ impl Metadata {
         )?;
         Ok(())
     }
+
+    pub fn ingest_runs(&self, limit: usize) -> Result<Vec<IngestRunRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT r.run_id, r.source_id, r.status, r.baseline_snapshot_id,
+                    r.baseline_manifest_id, r.touched_resources_json, r.created_at, r.finished_at,
+                    s.original_name, s.source_version_id, s.sha256, s.size
+             FROM ingest_runs AS r
+             LEFT JOIN sources AS s ON s.source_id = r.source_id
+             ORDER BY r.created_at DESC
+             LIMIT ?1",
+        )?;
+        let runs = statement
+            .query_map(rusqlite::params![limit], |row| {
+                Ok(IngestRunRow {
+                    run_id: row.get(0)?,
+                    source_id: row.get(1)?,
+                    status: row.get(2)?,
+                    baseline_snapshot_id: row.get(3)?,
+                    baseline_manifest_id: row.get(4)?,
+                    touched_resources: touched_resources(&row.get::<_, String>(5)?),
+                    created_at: row.get(6)?,
+                    finished_at: row.get(7)?,
+                    original_name: row.get(8)?,
+                    source_version_id: row.get(9)?,
+                    sha256: row.get(10)?,
+                    size: row.get(11)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(runs)
+    }
+
+    pub fn ingest_run(&self, run_id: &str) -> Result<Option<IngestRunRow>> {
+        let mut statement = self.connection.prepare(
+            "SELECT r.run_id, r.source_id, r.status, r.baseline_snapshot_id,
+                    r.baseline_manifest_id, r.touched_resources_json, r.created_at, r.finished_at,
+                    s.original_name, s.source_version_id, s.sha256, s.size
+             FROM ingest_runs AS r
+             LEFT JOIN sources AS s ON s.source_id = r.source_id
+             WHERE r.run_id = ?1",
+        )?;
+        let run = statement
+            .query_row(rusqlite::params![run_id], |row| {
+                Ok(IngestRunRow {
+                    run_id: row.get(0)?,
+                    source_id: row.get(1)?,
+                    status: row.get(2)?,
+                    baseline_snapshot_id: row.get(3)?,
+                    baseline_manifest_id: row.get(4)?,
+                    touched_resources: touched_resources(&row.get::<_, String>(5)?),
+                    created_at: row.get(6)?,
+                    finished_at: row.get(7)?,
+                    original_name: row.get(8)?,
+                    source_version_id: row.get(9)?,
+                    sha256: row.get(10)?,
+                    size: row.get(11)?,
+                })
+            })
+            .optional()?;
+        Ok(run)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -445,4 +552,30 @@ fn add_column_if_missing(
         )?;
     }
     Ok(())
+}
+
+fn touched_resources(raw: &str) -> Vec<TouchedResource> {
+    serde_json::from_str::<Vec<corpusbot_core::ResourceRevision>>(raw)
+        .map(|resources| {
+            resources
+                .into_iter()
+                .map(|resource| {
+                    let (revision_kind, sha256) = match resource.revision() {
+                        corpusbot_core::Revision::Absent => ("absent".to_owned(), None),
+                        corpusbot_core::Revision::Content { sha256 } => {
+                            ("content".to_owned(), Some(sha256.clone()))
+                        }
+                        corpusbot_core::Revision::Generation { id, sequence } => {
+                            ("generation".to_owned(), Some(format!("{id}:{sequence}")))
+                        }
+                    };
+                    TouchedResource {
+                        path: resource.resource().path().to_owned(),
+                        revision_kind,
+                        sha256,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

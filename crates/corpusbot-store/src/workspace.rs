@@ -46,6 +46,7 @@ impl WorkspacePaths {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceSummary {
     pub root: String,
     pub template: String,
@@ -53,6 +54,7 @@ pub struct WorkspaceSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceStatus {
     pub root: String,
     pub template: String,
@@ -64,6 +66,7 @@ pub struct WorkspaceStatus {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SnapshotResult {
     pub result: String,
     pub snapshot_id: String,
@@ -72,6 +75,7 @@ pub struct SnapshotResult {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SnapshotRow {
     pub snapshot_id: String,
     pub message: String,
@@ -313,6 +317,13 @@ impl Workspace {
         self.metadata.source_by_sha(sha256)
     }
 
+    pub fn source_by_version_id(
+        &self,
+        source_version_id: &str,
+    ) -> Result<Option<crate::SourceRow>> {
+        self.metadata.source_by_version_id(source_version_id)
+    }
+
     pub fn write_draft(&self, run_id: &str, relative: &str, content: &[u8]) -> Result<PathBuf> {
         ResourceId::new(relative)?;
         let path = self.paths.drafts.join(run_id).join(relative);
@@ -379,9 +390,14 @@ impl Workspace {
 
     pub fn commit_ingest(&self, request: &IngestCommitRequest) -> Result<IngestCommitResult> {
         self.reconcile_pending_restore()?;
-        self.reconcile_pending_ingest()?;
+        if let Some(pending) = self.metadata.pending_ingest()?
+            && pending.run_id != request.run_id
+        {
+            self.reconcile_pending_ingest()?;
+        }
         let lock = WorkspaceLock::acquire(&self.paths.root, "ingest-commit")?;
-        if self.metadata.has_pending_recovery()? {
+        let pending = self.metadata.pending_ingest()?;
+        if pending.is_some_and(|run| run.run_id != request.run_id) {
             return Err(StoreError::RecoveryPending);
         }
         if let Some(state) = self.repository.unsafe_state() {
@@ -460,6 +476,8 @@ impl Workspace {
             }
         };
         transaction.commit()?;
+        self.metadata
+            .mark_ingest_finished(&request.run_id, "committed")?;
         let manifest = capture_revision_manifest(&self.paths.root, &snapshot.commit_id)?;
         drop(lock);
 
@@ -544,6 +562,14 @@ impl Workspace {
                 created_at: summary.created_at,
             })
             .collect())
+    }
+
+    pub fn ingest_runs(&self, limit: usize) -> Result<Vec<crate::IngestRunRow>> {
+        self.metadata.ingest_runs(limit)
+    }
+
+    pub fn ingest_run(&self, run_id: &str) -> Result<Option<crate::IngestRunRow>> {
+        self.metadata.ingest_run(run_id)
     }
 
     pub fn restore(&self, snapshot_id: &str) -> Result<()> {
@@ -1236,6 +1262,41 @@ Raft elects a leader.
             &rfc3339(datetime!(2026-09-07 12:00 UTC))?,
         )?;
         assert!(workspace.metadata.source_exists_by_sha(&sha)?);
+        Ok(())
+    }
+
+    #[test]
+    fn committed_ingest_runs_are_listed_with_touched_resources() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        Workspace::init(root.path(), Template::Generic)?;
+        let workspace = Workspace::open(root.path(), Template::Generic)?;
+        let source = crate::SourceRow {
+            source_id: "source_history".to_owned(),
+            source_version_id: "version_history".to_owned(),
+            sha256: "b".repeat(64),
+            original_name: "history.md".to_owned(),
+            size: 128,
+            imported_at: rfc3339(time::OffsetDateTime::UNIX_EPOCH)?,
+        };
+        let request = test_request(
+            "history-run",
+            "wiki/entities/History.md",
+            workspace.revision_manifest()?,
+            Some(source),
+        );
+
+        workspace.begin_ingest(&request)?;
+        workspace.commit_ingest(&request)?;
+
+        let runs = workspace.ingest_runs(10)?;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "history-run");
+        assert_eq!(runs[0].status, "committed");
+        assert_eq!(runs[0].original_name.as_deref(), Some("history.md"));
+        assert_eq!(
+            runs[0].touched_resources[0].path,
+            "wiki/entities/History.md"
+        );
         Ok(())
     }
 

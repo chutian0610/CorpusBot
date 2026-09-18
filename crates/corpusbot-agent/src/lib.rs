@@ -8,9 +8,14 @@ pub mod workflow;
 pub use audit::{AuditSink, FileAuditSink, WorkflowAuditEvent};
 pub use config::ProviderConfig;
 pub use config::git_identity;
-pub use config::{SettingsInput, SettingsSummary, load_settings, provider_config, save_settings};
+pub use config::{
+    SettingsInput, SettingsSummary, load_settings, provider_config, provider_config_for_settings,
+    save_settings,
+};
 pub use error::{AgentError, Result};
-pub use llm::{FakeLlmClient, LlmClient, LlmRequest, LlmResponse, RigLlmClient};
+pub use llm::{
+    ConnectionTestResult, FakeLlmClient, LlmClient, LlmRequest, LlmResponse, RigLlmClient,
+};
 pub use task::{
     ANALYZE_PROMPT_ID, Citation, ConceptAnalysis, DRAFT_PROMPT_ID, DraftPlan, EntityAnalysis,
     QUERY_PROMPT_ID, QueryAnswer, QueryContextPage, SourceAgent, SourceAnalysis,
