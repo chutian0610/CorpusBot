@@ -73,6 +73,7 @@ export function DocumentsView() {
     selectedDocument?.sourcePage === selectedPath ? selectedDocument : undefined;
   const selectedIsRaw = selectedDocument?.rawPath === selectedPath;
   const selectedRaw = rawSource && rawSource.path === selectedPath ? rawSource : undefined;
+  const documentContent = selectedRaw?.markdown ?? selectedPage?.body ?? '';
 
   const selectTreeItem = (item: FileTreeItem) => {
     const sourceVersionId = rawPaths.get(item.path);
@@ -138,6 +139,23 @@ export function DocumentsView() {
                 </p>
               </div>
 
+              <section aria-labelledby="document-content-heading" className="space-y-3">
+                <h3 id="document-content-heading" className="text-base font-semibold">
+                  {selectedRaw
+                    ? 'Raw source'
+                    : selectedSource
+                      ? 'Document content'
+                      : 'Page content'}
+                </h3>
+                {selectedIsRaw && rawSourceLoading ? (
+                  <p className="text-sm text-stone-500">Loading content</p>
+                ) : (
+                  <div className="rounded-md border border-stone-200 bg-white p-4">
+                    <MarkdownPreview markdown={documentContent} />
+                  </div>
+                )}
+              </section>
+
               <section aria-labelledby="document-structure-heading" className="space-y-3">
                 <h3 id="document-structure-heading" className="text-base font-semibold">
                   Extracted structure
@@ -173,32 +191,6 @@ export function DocumentsView() {
                   </ul>
                 )}
               </section>
-
-              {selectedIsRaw ? (
-                <section aria-labelledby="raw-source-heading" className="space-y-3">
-                  <h3 id="raw-source-heading" className="text-base font-semibold">
-                    Raw source
-                  </h3>
-                  {rawSourceLoading ? (
-                    <p className="text-sm text-stone-500">Loading raw source</p>
-                  ) : selectedRaw ? (
-                    <div className="rounded-md border border-stone-200 bg-white p-4">
-                      <MarkdownPreview markdown={selectedRaw.markdown} />
-                    </div>
-                  ) : (
-                    <p className="text-sm text-red-600">Raw source unavailable.</p>
-                  )}
-                </section>
-              ) : selectedSource ? (
-                <section aria-labelledby="document-source-heading" className="space-y-3">
-                  <h3 id="document-source-heading" className="text-base font-semibold">
-                    Source page
-                  </h3>
-                  <div className="rounded-md border border-stone-200 bg-white p-4">
-                    <MarkdownPreview markdown={selectedPage?.body ?? ''} />
-                  </div>
-                </section>
-              ) : null}
 
               {!selectedIsRaw && selectedPage ? <PageMetadata page={selectedPage} /> : null}
             </div>

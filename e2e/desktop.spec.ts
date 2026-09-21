@@ -70,7 +70,9 @@ test('imports, reads, questions, lints, and restores a workspace', async ({ page
     .getByRole('region', { name: 'Extracted structure' })
     .getByRole('button', { name: /E2E import/ })
     .click();
-  await expect(page.getByRole('heading', { name: 'E2E import' })).toBeVisible();
+  const documentContent = page.getByRole('article');
+  await expect(documentContent.getByRole('heading', { name: 'E2E import' })).toBeVisible();
+  await expect(documentContent.getByText('This page provides E2E evidence')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Metadata' })).toBeVisible();
   await expect(page.getByText('Type')).toBeVisible();
 
