@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use corpusbot_core::{PageIdentity, PageType, Template, WikiPath, Wikilink, extract_wikilinks};
+use serde::Serialize;
 use serde_yaml::Value;
 use time::OffsetDateTime;
 use walkdir::WalkDir;
@@ -18,6 +20,17 @@ const REQUIRED_FIELDS: [&str; 7] = [
 struct RawPage {
     path: String,
     markdown: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ComparisonRecord {
+    event: &'static str,
+    timestamp: String,
+    workspace: String,
+    revision_manifest_id: String,
+    left: String,
+    right: String,
+    similar: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -60,17 +73,84 @@ pub fn run_lint(
         });
     }
 
-    run_lint_pages(&raw_pages, template, revision_manifest_id)
+    let comparison_log = comparison_log_path();
+    run_lint_pages_with_comparison_log(
+        &raw_pages,
+        template,
+        revision_manifest_id,
+        Some(root),
+        comparison_log.as_deref(),
+    )
 }
 
+fn rfc3339_now() -> String {
+    OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
+
+fn comparison_log_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| {
+        home.join(".corpusbot")
+            .join("logs")
+            .join("health-comparisons.jsonl")
+    })
+}
+
+fn write_comparison_log(path: &Path, records: &[ComparisonRecord]) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut output = String::new();
+    for record in records {
+        output.push_str(&serde_json::to_string(record)?);
+        output.push('\n');
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(output.as_bytes())?;
+    Ok(())
+}
+
+fn log_comparison_records(path: &Path, records: &[ComparisonRecord]) {
+    if let Err(error) = write_comparison_log(path, records) {
+        tracing::warn!(
+            error = %error,
+            path = %path.display(),
+            "failed to write health comparison log"
+        );
+    }
+}
+
+#[cfg(test)]
 fn run_lint_pages(
     raw_pages: &[RawPage],
     template: Template,
     revision_manifest_id: impl Into<String>,
 ) -> Result<LintReport> {
+    run_lint_pages_with_comparison_log(raw_pages, template, revision_manifest_id, None, None)
+}
+
+fn run_lint_pages_with_comparison_log(
+    raw_pages: &[RawPage],
+    template: Template,
+    revision_manifest_id: impl Into<String>,
+    workspace: Option<&Path>,
+    comparison_log: Option<&Path>,
+) -> Result<LintReport> {
     let mut issues = Vec::new();
     let mut parsed = Vec::new();
     let mut resolution = HashMap::new();
+    let mut comparisons = Vec::new();
+    let revision_manifest_id = revision_manifest_id.into();
 
     for page in raw_pages {
         let parsed_page = parse_page(page, template, &mut issues)?;
@@ -146,11 +226,19 @@ fn run_lint_pages(
             }
             let left_name = normalize(left.title.as_deref().unwrap_or_default());
             let right_name = normalize(right.title.as_deref().unwrap_or_default());
-            eprintln!(
-                "compare={left_name:?} {right_name:?} similar={}",
-                similar(&left_name, &right_name)
-            );
-            if left_name != right_name && similar(&left_name, &right_name) {
+            let similar_titles = similar(&left_name, &right_name);
+            comparisons.push(ComparisonRecord {
+                event: "title_comparison",
+                timestamp: rfc3339_now(),
+                workspace: workspace
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                revision_manifest_id: revision_manifest_id.clone(),
+                left: left_name.clone(),
+                right: right_name.clone(),
+                similar: similar_titles,
+            });
+            if left_name != right_name && similar_titles {
                 issues.push(LintIssue {
                     code: "POSSIBLE_DUPLICATE".to_owned(),
                     severity: Severity::Warning,
@@ -175,6 +263,10 @@ fn run_lint_pages(
         .filter(|issue| issue.severity == Severity::Error)
         .count();
     let warnings = issues.len() - errors;
+    if let Some(log_path) = comparison_log {
+        log_comparison_records(log_path, &comparisons);
+    }
+
     Ok(LintReport {
         generated_at: OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
@@ -182,7 +274,7 @@ fn run_lint_pages(
                 LintError::Core(corpusbot_core::CoreError::Frontmatter(error.to_string()))
             })?,
         template: template.as_str().to_owned(),
-        revision_manifest_id: revision_manifest_id.into(),
+        revision_manifest_id,
         summary: LintSummary {
             pages: parsed
                 .iter()
@@ -581,6 +673,65 @@ Similar idea.
                 .iter()
                 .any(|issue| issue.code == "POSSIBLE_DUPLICATE")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_title_comparisons_as_jsonl() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut pages = vec![
+            source_page(),
+            entity_page("Raft elects a leader.", "2026-09-08", "entity"),
+        ];
+        pages[1].markdown = pages[1]
+            .markdown
+            .replace("title: Raft\n", "title: Raft Algorithm\n");
+        pages.push(RawPage {
+            path: "wiki/entities/Raft Algorithm.md".to_owned(),
+            markdown: r#"---
+type: entity
+title: Raft Algorythm
+created: 2026-09-08
+updated: 2026-09-08
+tags: []
+related: []
+sources: []
+---
+
+Similar idea.
+"#
+            .to_owned(),
+        });
+        pages.push(index_page(&[
+            "wiki/entities/Raft.md",
+            "wiki/entities/Raft Algorithm.md",
+            "wiki/sources/RaftSource.md",
+        ]));
+
+        let log_path = temp.path().join("logs/health-comparisons.jsonl");
+        run_lint_pages_with_comparison_log(
+            &pages,
+            Template::Research,
+            "manifest",
+            Some(temp.path()),
+            Some(&log_path),
+        )?;
+
+        let records = std::fs::read_to_string(&log_path)?
+            .lines()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record["event"], "title_comparison");
+        assert_eq!(
+            record["workspace"],
+            temp.path().to_string_lossy().into_owned()
+        );
+        assert_eq!(record["revision_manifest_id"], "manifest");
+        assert_eq!(record["left"], "raft algorithm");
+        assert_eq!(record["right"], "raft algorythm");
+        assert_eq!(record["similar"], true);
         Ok(())
     }
 }
