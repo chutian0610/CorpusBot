@@ -30,8 +30,46 @@ ANALYSIS = {
 
 DRAFTS = {
     "source_summary": "Raft elects a leader and commits replicated log entries.",
-    "entities": ANALYSIS["entities"],
-    "concepts": ANALYSIS["concepts"],
+    "entities": [
+        {
+            "name": "Distributed Consensus",
+            "aliases": ["Raft"],
+            "summary": "A distributed consensus algorithm that elects a leader.",
+            "tags": ["consensus"],
+            "related": ["Leader Election"],
+            "sections": [
+                {
+                    "heading": "Role",
+                    "paragraphs": [
+                        "The algorithm coordinates replicated state through an elected leader."
+                    ],
+                },
+                {
+                    "heading": "Evidence",
+                    "bullets": ["A leader commits replicated log entries."],
+                },
+            ],
+        }
+    ],
+    "concepts": [
+        {
+            "name": "Leader Election",
+            "definition": "Candidates win after a majority grants their term.",
+            "aliases": ["term election"],
+            "tags": ["consensus", "election"],
+            "related": ["Distributed Consensus"],
+            "sections": [
+                {
+                    "heading": "Mechanism",
+                    "paragraphs": ["A candidate becomes leader after a majority grants its term."]
+                },
+                {
+                    "heading": "Outcome",
+                    "bullets": ["The elected leader coordinates the next phase."],
+                },
+            ],
+        }
+    ],
 }
 
 

@@ -33,6 +33,10 @@ pub struct WorkflowAuditEvent {
     pub latency_ms: Option<u64>,
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub finish_reason: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
     pub decision: Option<String>,
     pub error_code: Option<String>,
 }
@@ -58,9 +62,44 @@ impl WorkflowAuditEvent {
             latency_ms: None,
             tokens_in: None,
             tokens_out: None,
+            max_tokens: None,
+            finish_reason: None,
+            truncated: false,
             decision: None,
             error_code: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_legacy_events_without_token_limit_fields() {
+        let event: WorkflowAuditEvent = serde_json::from_value(serde_json::json!({
+            "event_id": "legacy",
+            "run_id": "legacy-run",
+            "node": "analyze",
+            "attempt": 1,
+            "status": "succeeded",
+            "input_manifest_id": null,
+            "output_ref": null,
+            "prompt_template_id": null,
+            "prompt_hash": null,
+            "provider": null,
+            "model": null,
+            "latency_ms": null,
+            "tokens_in": null,
+            "tokens_out": null,
+            "decision": null,
+            "error_code": null
+        }))
+        .unwrap();
+
+        assert_eq!(event.max_tokens, None);
+        assert_eq!(event.finish_reason, None);
+        assert!(!event.truncated);
     }
 }
 

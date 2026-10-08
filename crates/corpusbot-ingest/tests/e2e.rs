@@ -40,13 +40,38 @@ const DRAFTS_ONE: &str = r#"{
     {
       "name": "Raft",
       "aliases": ["Raft consensus"],
-      "summary": "A leader-based consensus algorithm."
+      "summary": "A leader-based consensus algorithm used to coordinate replicated state.",
+      "tags": ["consensus"],
+      "related": ["Leader Election"],
+      "sections": [
+        {
+          "heading": "Role",
+          "paragraphs": ["Raft coordinates a replicated state machine through an elected leader."]
+        },
+        {
+          "heading": "Evidence",
+          "bullets": ["A candidate needs a majority of votes."]
+        }
+      ]
     }
   ],
   "concepts": [
     {
       "name": "Leader Election",
-      "definition": "Selecting a coordinator before replication."
+      "definition": "Selecting a coordinator before replicated log entries are applied.",
+      "aliases": ["leader selection"],
+      "tags": ["consensus", "election"],
+      "related": ["Raft"],
+      "sections": [
+        {
+          "heading": "Mechanism",
+          "paragraphs": ["Candidates request votes before they may coordinate replication."]
+        },
+        {
+          "heading": "Failure behavior",
+          "bullets": ["A candidate without a majority cannot become leader."]
+        }
+      ]
     }
   ]
 }"#;
@@ -75,13 +100,38 @@ const DRAFTS_TWO: &str = r#"{
     {
       "name": "Raft",
       "aliases": [],
-      "summary": "Majority votes elect a candidate."
+      "summary": "Majority votes elect a candidate in the Raft consensus protocol.",
+      "tags": ["consensus", "election"],
+      "related": ["Leader Election"],
+      "sections": [
+        {
+          "heading": "Evidence",
+          "paragraphs": ["Additional evidence shows a candidate becomes leader after majority votes."]
+        },
+        {
+          "heading": "Operational meaning",
+          "bullets": ["Majority availability is required for election."]
+        }
+      ]
     }
   ],
   "concepts": [
     {
       "name": "Leader Election",
-      "definition": "A majority vote makes a candidate leader."
+      "definition": "A majority vote makes a candidate leader and authorizes replication.",
+      "aliases": [],
+      "tags": ["election"],
+      "related": ["Raft"],
+      "sections": [
+        {
+          "heading": "Evidence",
+          "paragraphs": ["The source states that majority votes make a candidate leader."]
+        },
+        {
+          "heading": "Invariant",
+          "bullets": ["Only a candidate with majority support becomes leader."]
+        }
+      ]
     }
   ]
 }"#;
@@ -123,8 +173,22 @@ async fn fake_llm_end_to_end_compiles_searches_answers_lints_and_restores()
         .find(|path| path.starts_with("wiki/entities/"))
         .expect("first ingest should create an entity")
         .clone();
+    let first_source_path = first_created_paths
+        .iter()
+        .find(|path| path.starts_with("wiki/sources/"))
+        .expect("first ingest should create a source page")
+        .clone();
     let original_entity = workspace.read_page(&entity_path)?;
-    assert!(original_entity.contains("A leader-based consensus algorithm."));
+    assert!(original_entity.contains("tags:"));
+    assert!(original_entity.contains("- consensus"));
+    assert!(original_entity.contains("aliases:"));
+    assert!(original_entity.contains("- raft consensus"));
+    assert!(original_entity.contains("A leader-based consensus algorithm used"));
+    let first_source = workspace.read_page(&first_source_path)?;
+    assert!(first_source.contains(&format!("[[{entity_path}|Raft]]")));
+    let first_index = workspace.read_page("wiki/index.md")?;
+    assert!(first_index.contains(&entity_path));
+    assert!(first_index.contains("wiki/concepts/leader-election.md"));
 
     let source_two = root.path().join("source-two.md");
     std::fs::write(&source_two, SOURCE_TWO)?;
@@ -163,9 +227,9 @@ async fn fake_llm_end_to_end_compiles_searches_answers_lints_and_restores()
     assert!(ingest_ledger.contains(r#""prompt_hash""#));
 
     let merged_entity = workspace.read_page(&entity_path)?;
-    assert!(merged_entity.contains("A leader-based consensus algorithm."));
+    assert!(merged_entity.contains("A leader-based consensus algorithm used"));
     assert!(
-        merged_entity.contains("Majority votes elect a candidate."),
+        merged_entity.contains("Majority votes elect a candidate in the Raft consensus protocol."),
         "merged entity:\n{merged_entity}"
     );
 
@@ -209,6 +273,11 @@ async fn fake_llm_end_to_end_compiles_searches_answers_lints_and_restores()
 
     let lint = run_lint(root.path(), Template::Research, manifest.manifest_id())?;
     assert_eq!(lint.summary.errors, 0);
+    assert_eq!(
+        lint.summary.warnings, 0,
+        "unexpected lint warnings: {:?}",
+        lint.issues
+    );
 
     workspace.restore(&first_snapshot_id)?;
     let restored = workspace.read_page(&entity_path)?;

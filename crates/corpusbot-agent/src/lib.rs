@@ -6,6 +6,7 @@ pub mod task;
 pub mod workflow;
 
 pub use audit::{AuditSink, FileAuditSink, WorkflowAuditEvent};
+pub use config::DEFAULT_DRAFT_MAX_TOKENS;
 pub use config::ProviderConfig;
 pub use config::git_identity;
 pub use config::{
@@ -17,8 +18,9 @@ pub use llm::{
     ConnectionTestResult, FakeLlmClient, LlmClient, LlmRequest, LlmResponse, RigLlmClient,
 };
 pub use task::{
-    ANALYZE_PROMPT_ID, Citation, ConceptAnalysis, DRAFT_PROMPT_ID, DraftPlan, EntityAnalysis,
-    QUERY_PROMPT_ID, QueryAnswer, QueryContextPage, SourceAgent, SourceAnalysis,
+    ANALYZE_PROMPT_ID, Citation, ConceptAnalysis, ConceptDraft, DRAFT_PROMPT_ID, DraftPlan,
+    DraftSection, EntityAnalysis, EntityDraft, QUERY_PROMPT_ID, QueryAnswer, QueryContextPage,
+    SourceAgent, SourceAnalysis,
 };
 pub use workflow::{AttemptStatus, Transition, WorkflowNode, WorkflowOutcome};
 

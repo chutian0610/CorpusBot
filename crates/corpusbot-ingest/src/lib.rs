@@ -4,7 +4,9 @@ pub mod error;
 pub mod service;
 
 pub use error::{IngestError, Result};
-pub use service::{IngestResult, Ingestor};
+pub use service::{
+    IngestProgressCallback, IngestProgressUpdate, IngestResult, IngestStage, Ingestor,
+};
 
 pub fn attempts_exhausted(attempt: u32, max: u32) -> bool {
     attempt >= max

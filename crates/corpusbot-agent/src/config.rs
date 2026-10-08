@@ -5,6 +5,7 @@ use time::OffsetDateTime;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
+pub const DEFAULT_DRAFT_MAX_TOKENS: u64 = 12_000;
 pub const DAEMON_DB_FILE_NAME: &str = "daemon.db";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -12,6 +13,7 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub max_draft_tokens: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -21,6 +23,7 @@ pub(crate) struct SettingsRecord {
     api_key: Option<String>,
     git_author_name: Option<String>,
     git_author_email: Option<String>,
+    draft_max_tokens: Option<i64>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -31,6 +34,7 @@ pub struct SettingsSummary {
     pub has_api_key: bool,
     pub git_author_name: Option<String>,
     pub git_author_email: Option<String>,
+    pub max_draft_tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -41,6 +45,7 @@ pub struct SettingsInput {
     pub api_key: Option<String>,
     pub git_author_name: Option<String>,
     pub git_author_email: Option<String>,
+    pub max_draft_tokens: Option<u64>,
 }
 
 pub fn load_settings() -> Result<SettingsSummary> {
@@ -107,6 +112,8 @@ pub(crate) fn save_settings_at(
         .git_author_email
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
+    record.draft_max_tokens =
+        normalize_draft_max_tokens(input.max_draft_tokens)?.map(|value| value as i64);
 
     let updated_at = OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -114,14 +121,16 @@ pub(crate) fn save_settings_at(
     let transaction = connection.unchecked_transaction()?;
     transaction.execute(
         "INSERT INTO app_settings(
-                id, base_url, model, api_key, git_author_name, git_author_email, updated_at
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+                id, base_url, model, api_key, git_author_name, git_author_email, draft_max_tokens,
+                updated_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                base_url = excluded.base_url,
                model = excluded.model,
                api_key = excluded.api_key,
                git_author_name = excluded.git_author_name,
                git_author_email = excluded.git_author_email,
+               draft_max_tokens = excluded.draft_max_tokens,
                updated_at = excluded.updated_at",
         rusqlite::params![
             record.base_url,
@@ -129,6 +138,7 @@ pub(crate) fn save_settings_at(
             record.api_key,
             record.git_author_name,
             record.git_author_email,
+            record.draft_max_tokens,
             updated_at
         ],
     )?;
@@ -145,7 +155,11 @@ pub fn provider_config() -> Result<ProviderConfig> {
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
     let api_key = record.api_key.unwrap_or_default();
     let model = record.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-    ProviderConfig::new(base_url, api_key, model)
+    let max_draft_tokens = record
+        .draft_max_tokens
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(DEFAULT_DRAFT_MAX_TOKENS);
+    Ok(ProviderConfig::new(base_url, api_key, model)?.with_max_draft_tokens(max_draft_tokens))
 }
 
 pub fn provider_config_for_settings(input: &SettingsInput) -> Result<ProviderConfig> {
@@ -166,7 +180,15 @@ pub fn provider_config_for_settings(input: &SettingsInput) -> Result<ProviderCon
     let model = non_empty(input.model.as_ref())
         .or(record.model)
         .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-    ProviderConfig::new(base_url, api_key, model)
+    let max_draft_tokens = if input.max_draft_tokens.is_some() {
+        normalize_draft_max_tokens(input.max_draft_tokens)?
+    } else {
+        record
+            .draft_max_tokens
+            .and_then(|value| u64::try_from(value).ok())
+    };
+    Ok(ProviderConfig::new(base_url, api_key, model)?
+        .with_max_draft_tokens(max_draft_tokens.unwrap_or(DEFAULT_DRAFT_MAX_TOKENS)))
 }
 
 impl ProviderConfig {
@@ -178,7 +200,11 @@ impl ProviderConfig {
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         let api_key = record.api_key.unwrap_or_default();
         let model = record.model.unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        Self::new(base_url, api_key, model)
+        let max_draft_tokens = record
+            .draft_max_tokens
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(DEFAULT_DRAFT_MAX_TOKENS);
+        Ok(Self::new(base_url, api_key, model)?.with_max_draft_tokens(max_draft_tokens))
     }
 
     pub fn new(
@@ -199,7 +225,13 @@ impl ProviderConfig {
             base_url,
             api_key,
             model,
+            max_draft_tokens: DEFAULT_DRAFT_MAX_TOKENS,
         })
+    }
+
+    pub fn with_max_draft_tokens(mut self, value: u64) -> Self {
+        self.max_draft_tokens = value;
+        self
     }
 }
 
@@ -208,6 +240,18 @@ fn normalize_base_url(mut value: String) -> String {
         value.pop();
     }
     value
+}
+
+fn normalize_draft_max_tokens(value: Option<u64>) -> Result<Option<u64>> {
+    match value {
+        Some(0..=1023) => Err(AgentError::Configuration(
+            "draft max tokens must be at least 1024".into(),
+        )),
+        Some(value) if value > 200_000 => Err(AgentError::Configuration(
+            "draft max tokens must not exceed 200000".into(),
+        )),
+        value => Ok(value),
+    }
 }
 
 pub(crate) fn daemon_db_path() -> Result<std::path::PathBuf> {
@@ -229,6 +273,9 @@ fn settings_summary(record: &SettingsRecord) -> SettingsSummary {
             .is_some_and(|key| !key.trim().is_empty()),
         git_author_name: record.git_author_name.clone(),
         git_author_email: record.git_author_email.clone(),
+        max_draft_tokens: record
+            .draft_max_tokens
+            .and_then(|value| u64::try_from(value).ok()),
     }
 }
 
@@ -254,9 +301,21 @@ fn open_daemon_database(path: &std::path::Path) -> Result<Connection> {
           api_key TEXT,
           git_author_name TEXT,
           git_author_email TEXT,
+          draft_max_tokens INTEGER,
           updated_at TEXT NOT NULL
         )",
     )?;
+
+    let column_exists = connection
+        .prepare("SELECT 1 FROM pragma_table_info('app_settings') WHERE name = 'draft_max_tokens'")?
+        .query_row([], |_| Ok(()))
+        .optional()?;
+    if column_exists.is_none() {
+        connection.execute(
+            "ALTER TABLE app_settings ADD COLUMN draft_max_tokens INTEGER",
+            [],
+        )?;
+    }
 
     #[cfg(unix)]
     {
@@ -272,7 +331,7 @@ fn open_daemon_database(path: &std::path::Path) -> Result<Connection> {
 fn read_settings_record(connection: &Connection) -> Result<Option<SettingsRecord>> {
     let record = connection
         .query_row(
-            "SELECT base_url, model, api_key, git_author_name, git_author_email
+            "SELECT base_url, model, api_key, git_author_name, git_author_email, draft_max_tokens
              FROM app_settings WHERE id = 1",
             [],
             |row| {
@@ -282,6 +341,7 @@ fn read_settings_record(connection: &Connection) -> Result<Option<SettingsRecord
                     api_key: row.get(2)?,
                     git_author_name: row.get(3)?,
                     git_author_email: row.get(4)?,
+                    draft_max_tokens: row.get(5)?,
                 })
             },
         )
@@ -320,10 +380,12 @@ mod tests {
                 api_key: Some(" secret ".to_owned()),
                 git_author_name: Some(" Test User ".to_owned()),
                 git_author_email: Some(" test@example.com ".to_owned()),
+                max_draft_tokens: Some(8000),
             },
         )?;
         assert!(saved.has_api_key);
         assert_eq!(saved.git_author_name.as_deref(), Some("Test User"));
+        assert_eq!(saved.max_draft_tokens, Some(8000));
 
         let updated = save_settings_at(
             &database,
@@ -333,12 +395,24 @@ mod tests {
                 api_key: Some(String::new()),
                 git_author_name: None,
                 git_author_email: None,
+                max_draft_tokens: None,
             },
         )?;
         assert_eq!(updated.base_url, None);
         assert_eq!(updated.model, None);
         assert!(!updated.has_api_key);
         assert_eq!(updated.git_author_name, None);
+        assert_eq!(updated.max_draft_tokens, None);
         Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_draft_token_limits() {
+        assert!(normalize_draft_max_tokens(Some(1)).is_err());
+        assert!(normalize_draft_max_tokens(Some(201_000)).is_err());
+        assert_eq!(
+            normalize_draft_max_tokens(Some(12000)).unwrap(),
+            Some(12000)
+        );
     }
 }

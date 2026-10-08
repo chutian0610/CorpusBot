@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use rig_core::client::CompletionClient;
+use rig_core::client::VerifyClient;
+use rig_core::completion::FinishReason;
 use rig_core::completion::message::AssistantContent;
 use rig_core::completion::request::CompletionRequestBuilder;
 use rig_core::providers::openai::completion::CompletionModel;
@@ -16,11 +18,21 @@ pub struct LlmRequest {
     pub prompt_template_id: String,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u64>,
+    pub structured_output: Option<StructuredOutput>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct StructuredOutput {
+    pub name: String,
+    pub schema: serde_json::Value,
 }
 
 impl LlmRequest {
     pub fn prompt_hash(&self) -> String {
-        let digest = Sha256::digest(format!("{}\n{}", self.system, self.prompt).as_bytes());
+        let structured_output = serde_json::to_string(&self.structured_output).unwrap_or_default();
+        let digest = Sha256::digest(
+            format!("{}\n{}\n{}", self.system, self.prompt, structured_output).as_bytes(),
+        );
         format!("{digest:x}")
     }
 }
@@ -33,6 +45,7 @@ pub struct LlmResponse {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub response_id: Option<String>,
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -47,9 +60,31 @@ pub struct ConnectionTestResult {
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse>;
+
+    async fn test_connection(&self) -> Result<ConnectionTestResult> {
+        let started_at = std::time::Instant::now();
+        let response = self
+            .complete(LlmRequest {
+                operation: "connection-test".to_owned(),
+                system: String::new(),
+                prompt: "Reply with OK.".to_owned(),
+                prompt_template_id: "connection-test-v1".to_owned(),
+                temperature: None,
+                max_tokens: Some(64),
+                structured_output: None,
+            })
+            .await?;
+        Ok(ConnectionTestResult {
+            provider: response.provider,
+            model: response.model,
+            latency_ms: started_at.elapsed().as_millis() as u64,
+            response_id: response.response_id,
+        })
+    }
 }
 
 pub struct RigLlmClient {
+    client: rig_core::providers::openai::CompletionsClient,
     model: CompletionModel,
     provider: String,
     model_name: String,
@@ -70,6 +105,7 @@ impl RigLlmClient {
         let model = client.completion_model(model_name.clone());
 
         Ok(Self {
+            client,
             model,
             provider: "openai-compatible".to_owned(),
             model_name,
@@ -78,23 +114,15 @@ impl RigLlmClient {
 
     pub async fn test_connection(&self) -> Result<ConnectionTestResult> {
         let started_at = std::time::Instant::now();
-        let request = async {
-            CompletionRequestBuilder::new(self.model.clone(), "Reply with OK.".to_owned())
-                .max_tokens_opt(Some(1))
-                .send()
-                .await
-        };
-        let response = match tokio::time::timeout(std::time::Duration::from_secs(15), request).await
-        {
-            Ok(response) => response?,
-            Err(_) => return Err(AgentError::Timeout { timeout_ms: 15_000 }),
-        };
+        self.client.verify().await.map_err(|error| {
+            AgentError::Other(format!("provider verification failed: {error}").into())
+        })?;
 
         Ok(ConnectionTestResult {
             provider: self.provider.clone(),
             model: self.model_name.clone(),
             latency_ms: started_at.elapsed().as_millis() as u64,
-            response_id: response.response_id,
+            response_id: None,
         })
     }
 }
@@ -106,11 +134,31 @@ impl LlmClient for RigLlmClient {
         if !request.system.is_empty() {
             builder = builder.preamble(request.system.clone());
         }
+        if let Some(output) = &request.structured_output {
+            builder = builder.additional_params(serde_json::json!({
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": output.name,
+                        "strict": true,
+                        "schema": output.schema,
+                    }
+                }
+            }));
+        }
         let response = builder
             .temperature_opt(request.temperature)
             .max_tokens_opt(request.max_tokens)
             .send()
             .await?;
+
+        let finish_reason = response.finish_reason().map(|reason| match reason {
+            FinishReason::Stop => "stop".to_owned(),
+            FinishReason::Length => "length".to_owned(),
+            FinishReason::ToolCalls => "tool_calls".to_owned(),
+            FinishReason::ContentFilter => "content_filter".to_owned(),
+            FinishReason::Other(reason) => reason,
+        });
 
         let text = response
             .choice
@@ -132,6 +180,7 @@ impl LlmClient for RigLlmClient {
             prompt_tokens: response.usage.input_tokens,
             completion_tokens: response.usage.output_tokens,
             response_id: response.response_id,
+            finish_reason,
         })
     }
 }
@@ -139,14 +188,25 @@ impl LlmClient for RigLlmClient {
 #[derive(Default)]
 pub struct FakeLlmClient {
     responses: std::sync::Mutex<std::collections::VecDeque<String>>,
-    calls: std::sync::Mutex<Vec<LlmRequest>>,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<LlmRequest>>>,
+}
+
+impl Clone for FakeLlmClient {
+    fn clone(&self) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(
+                self.responses.lock().expect("responses mutex").clone(),
+            ),
+            calls: std::sync::Arc::clone(&self.calls),
+        }
+    }
 }
 
 impl FakeLlmClient {
     pub fn new(responses: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             responses: std::sync::Mutex::new(responses.into_iter().map(Into::into).collect()),
-            calls: std::sync::Mutex::new(Vec::new()),
+            calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -181,6 +241,7 @@ impl LlmClient for FakeLlmClient {
             prompt_tokens: 10,
             completion_tokens: 20,
             response_id: Some("fake-response".to_owned()),
+            finish_reason: None,
         })
     }
 }
@@ -199,6 +260,7 @@ mod tests {
             prompt_template_id: "analyze-v1".to_owned(),
             temperature: Some(0.1),
             max_tokens: Some(100),
+            structured_output: None,
         };
         let response = client.complete(request.clone()).await?;
         assert_eq!(response.text, r#"{"ok":true}"#);

@@ -73,7 +73,7 @@ export function DocumentsView() {
     selectedDocument?.sourcePage === selectedPath ? selectedDocument : undefined;
   const selectedIsRaw = selectedDocument?.rawPath === selectedPath;
   const selectedRaw = rawSource && rawSource.path === selectedPath ? rawSource : undefined;
-  const documentContent = selectedRaw?.markdown ?? selectedPage?.body ?? '';
+  const documentContent = selectedRaw ? (selectedRaw.body ?? '') : (selectedPage?.body ?? '');
 
   const selectTreeItem = (item: FileTreeItem) => {
     const sourceVersionId = rawPaths.get(item.path);
@@ -139,6 +139,8 @@ export function DocumentsView() {
                 </p>
               </div>
 
+              {!selectedIsRaw && selectedPage ? <PageMetadata page={selectedPage} /> : null}
+
               <section aria-labelledby="document-content-heading" className="space-y-3">
                 <h3 id="document-content-heading" className="text-base font-semibold">
                   {selectedRaw
@@ -151,48 +153,25 @@ export function DocumentsView() {
                   <p className="text-sm text-stone-500">Loading content</p>
                 ) : (
                   <div className="rounded-md border border-stone-200 bg-white p-4">
-                    <MarkdownPreview markdown={documentContent} />
+                    <MarkdownPreview
+                      markdown={documentContent}
+                      onWikilink={(target) => {
+                        const sourceVersionId = rawPaths.get(target);
+                        if (sourceVersionId) {
+                          void loadRawSource(sourceVersionId, target);
+                          return;
+                        }
+                        void selectPage(target);
+                      }}
+                      onRawLink={(target) => {
+                        if (selectedDocument?.rawPath === target) {
+                          void loadRawSource(selectedDocument.sourceVersionId, target);
+                        }
+                      }}
+                    />
                   </div>
                 )}
               </section>
-
-              <section aria-labelledby="document-structure-heading" className="space-y-3">
-                <h3 id="document-structure-heading" className="text-base font-semibold">
-                  Extracted structure
-                </h3>
-                {selectedDocument.pages.length === 0 ? (
-                  <p className="text-sm text-stone-500">
-                    No entity or concept pages were extracted from this document.
-                  </p>
-                ) : (
-                  <ul className="overflow-hidden rounded-md border border-stone-200 bg-white">
-                    {selectedDocument.pages.map((page) => (
-                      <li key={page.path} className="border-b border-stone-100 last:border-b-0">
-                        <button
-                          type="button"
-                          className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-stone-50"
-                          onClick={() => void selectPage(page.path)}
-                        >
-                          <span className="min-w-0">
-                            <span className="block truncate font-medium">{page.title}</span>
-                            <span
-                              className="block truncate text-xs text-stone-500"
-                              title={page.path}
-                            >
-                              {page.path}
-                            </span>
-                          </span>
-                          <span className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-xs capitalize text-stone-600">
-                            {page.pageType}
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
-
-              {!selectedIsRaw && selectedPage ? <PageMetadata page={selectedPage} /> : null}
             </div>
           )}
         </div>

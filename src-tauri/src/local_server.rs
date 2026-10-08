@@ -29,10 +29,42 @@ const E2E_ANALYSIS: &str = r#"{
 const E2E_DRAFTS: &str = r#"{
   "source_summary": "This page provides E2E evidence.",
   "entities": [
-    {"name": "E2E import", "aliases": ["E2E evidence"], "summary": "This page provides E2E evidence."}
+    {
+      "name": "E2E import",
+      "aliases": ["E2E evidence"],
+      "summary": "This page provides E2E evidence for the deterministic import workflow.",
+      "tags": ["e2e", "import"],
+      "related": ["E2E workflow"],
+      "sections": [
+        {
+          "heading": "Purpose",
+          "paragraphs": ["The import verifies that deterministic LLM output becomes a wiki page."]
+        },
+        {
+          "heading": "Checks",
+          "bullets": ["The page remains searchable after ingest."]
+        }
+      ]
+    }
   ],
   "concepts": [
-    {"name": "E2E workflow", "definition": "The deterministic E2E ingest workflow."}
+    {
+      "name": "E2E workflow",
+      "definition": "The deterministic E2E ingest workflow exercises commit and search indexing.",
+      "aliases": ["end-to-end workflow"],
+      "tags": ["e2e", "workflow"],
+      "related": ["E2E import"],
+      "sections": [
+        {
+          "heading": "Flow",
+          "paragraphs": ["The workflow ingests a source and verifies the generated page."]
+        },
+        {
+          "heading": "Guarantees",
+          "bullets": ["The generated page is searchable."]
+        }
+      ]
+    }
   ]
 }"#;
 
@@ -73,6 +105,7 @@ impl LlmClient for E2eFakeLlmClient {
             prompt_tokens: 24,
             completion_tokens: 32,
             response_id: Some(request.prompt_hash()),
+            finish_reason: Some("stop".to_owned()),
         })
     }
 }
@@ -168,20 +201,22 @@ async fn invoke(
                     root,
                     file_name,
                     markdown,
+                    corpusbot_agent::DEFAULT_DRAFT_MAX_TOKENS,
                     llm_client,
                 )
                 .await?
             } else {
-                let llm_client = corpusbot_agent::RigLlmClient::new(
-                    corpusbot_agent::provider_config()
-                        .map_err(|error| ApiError(error.to_string()))?,
-                )?;
+                let provider_config = corpusbot_agent::provider_config()
+                    .map_err(|error| ApiError(error.to_string()))?;
+                let llm_client = corpusbot_agent::RigLlmClient::new(provider_config.clone())
+                    .map_err(|error| ApiError(error.to_string()))?;
                 start_ingest_job(
                     None,
                     state.ingest_jobs.clone(),
                     root,
                     file_name,
                     markdown,
+                    provider_config.max_draft_tokens,
                     llm_client,
                 )
                 .await?
@@ -198,6 +233,13 @@ async fn invoke(
                 .and_then(|jobs| jobs.get(&job_id).cloned());
             json_response(job)
         }
+        "list_ingest_jobs" => {
+            let root: PathBuf = argument(&args, "root")?;
+            json_response(crate::commands::list_visible_ingest_jobs(
+                &state.ingest_jobs,
+                &root,
+            ))
+        }
         "list_documents" => {
             let root: PathBuf = argument(&args, "root")?;
             json_response(crate::commands::list_documents(root)?)
@@ -205,7 +247,11 @@ async fn invoke(
         "list_ingest_runs" => {
             let root: PathBuf = argument(&args, "root")?;
             let limit: Option<usize> = argument(&args, "limit")?;
-            json_response(crate::commands::list_ingest_runs(root, limit)?)
+            json_response(crate::commands::list_ingest_runs_for_store(
+                &state.ingest_jobs,
+                root,
+                limit,
+            )?)
         }
         "read_ingest_run" => {
             let root: PathBuf = argument(&args, "root")?;
@@ -265,6 +311,7 @@ async fn invoke(
                         has_api_key: false,
                         git_author_name: Some("CorpusBot E2E".to_owned()),
                         git_author_email: Some("e2e@corpusbot.invalid".to_owned()),
+                        max_draft_tokens: None,
                     },
                 );
                 json_response(settings)
@@ -284,6 +331,7 @@ async fn invoke(
                         .is_some_and(|key| !key.trim().is_empty()),
                     git_author_name: settings.git_author_name.clone(),
                     git_author_email: settings.git_author_email.clone(),
+                    max_draft_tokens: settings.max_draft_tokens,
                 };
                 *state.e2e_settings.lock().await = Some(summary.clone());
                 json_response(summary)
@@ -347,9 +395,9 @@ pub async fn serve(bind: std::net::SocketAddr) -> Result<(), std::io::Error> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    println!("CorpusBot local backend listening on http://{bind}");
+    tracing::info!(%bind, "CorpusBot local backend listening");
     if e2e_fake_llm {
-        println!("E2E fake LLM provider enabled");
+        tracing::info!("E2E fake LLM provider enabled");
     }
     axum::serve(listener, app).await
 }

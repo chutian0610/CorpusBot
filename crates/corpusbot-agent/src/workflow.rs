@@ -55,6 +55,7 @@ pub enum WorkflowOutcome<S> {
 
 #[derive(Clone, Debug)]
 pub struct LlmCallTelemetry {
+    pub max_tokens: Option<u64>,
     pub prompt_template_id: String,
     pub prompt_hash: String,
     pub provider: String,
@@ -62,6 +63,7 @@ pub struct LlmCallTelemetry {
     pub latency_ms: u64,
     pub tokens_in: u64,
     pub tokens_out: u64,
+    pub finish_reason: Option<String>,
     pub response_id: Option<String>,
 }
 
@@ -124,6 +126,7 @@ impl<S> WorkflowContext<S> {
         latency_ms: u64,
     ) {
         self.last_llm_call = Some(LlmCallTelemetry {
+            max_tokens: request.max_tokens,
             prompt_template_id: request.prompt_template_id.clone(),
             prompt_hash: request.prompt_hash(),
             provider: response.provider.clone(),
@@ -131,6 +134,7 @@ impl<S> WorkflowContext<S> {
             latency_ms,
             tokens_in: response.prompt_tokens,
             tokens_out: response.completion_tokens,
+            finish_reason: response.finish_reason.clone(),
             response_id: response.response_id.clone(),
         });
         self.last_response = Some(response.clone());
@@ -161,6 +165,9 @@ impl<S> WorkflowContext<S> {
             event.latency_ms = Some(call.latency_ms);
             event.tokens_in = Some(call.tokens_in);
             event.tokens_out = Some(call.tokens_out);
+            event.max_tokens = call.max_tokens;
+            event.finish_reason = call.finish_reason.clone();
+            event.truncated = call.finish_reason.as_deref() == Some("length");
         }
         self.audit_sink.record(event).await
     }

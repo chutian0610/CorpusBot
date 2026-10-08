@@ -93,6 +93,14 @@ mod tests {
     }
 
     #[test]
+    fn accepts_raw_resource_targets() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let link = Wikilink::parse("raw/hash/TCP guide.md|TCP guide.md")?;
+        assert_eq!(link.target(), "raw/hash/TCP guide.md");
+        assert_eq!(link.render(), "[[raw/hash/TCP guide.md|TCP guide.md]]");
+        Ok(())
+    }
+
+    #[test]
     fn rejects_empty_or_escaped_links() {
         for value in ["", "|alias", "target|", "[[nested]]", "target]]"] {
             assert!(Wikilink::parse(value).is_err(), "{value} should be invalid");

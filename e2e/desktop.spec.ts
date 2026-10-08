@@ -66,13 +66,16 @@ test('imports, reads, questions, lints, and restores a workspace', async ({ page
   await page.locator('[data-testid^="file-tree:raw/"][data-testid$="/e2e-import.md"]').click();
   await expect(page.getByRole('heading', { name: 'Raw source' })).toBeVisible();
   await expect(page.getByText('This page provides E2E evidence')).toBeVisible();
-  await page
-    .getByRole('region', { name: 'Extracted structure' })
-    .getByRole('button', { name: /E2E import/ })
-    .click();
+  await page.getByRole('button', { name: /wiki\/sources\/ver_\w+\.md/ }).click();
+  await expect(page.getByRole('heading', { name: 'Document content' })).toBeVisible();
+  await expect(page.getByRole('article')).toContainText('Extracted pages');
+  await expect(page.getByRole('article').getByRole('button', { name: 'E2E import' })).toHaveCount(
+    1,
+  );
+  await page.getByRole('button', { name: 'wiki/entities/e2e-import.md' }).click();
   const documentContent = page.getByRole('article');
   await expect(documentContent.getByRole('heading', { name: 'E2E import' })).toBeVisible();
-  await expect(documentContent.getByText('This page provides E2E evidence')).toBeVisible();
+  await expect(documentContent.getByText('for the deterministic import workflow')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Metadata' })).toBeVisible();
   await expect(page.getByText('Type')).toBeVisible();
 

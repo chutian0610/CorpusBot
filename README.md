@@ -74,7 +74,8 @@ The desktop shell has five primary views:
 - **Documents**: browse imported source pages in an editor-style folder tree and
   inspect the entity/concept pages extracted from each document.
 - **Ingest**: import Markdown and inspect run history, affected resources, the
-  original source, generated source pages, and workflow events.
+  generated source pages, and workflow events. Original Markdown remains in
+  `raw/`; the run detail no longer duplicates that content.
 - **Health**: run deterministic checks and report content-page/error/warning
   counts. Generated `wiki/index.md` and `wiki/log.md` are excluded from the
   content-page count.
@@ -86,6 +87,29 @@ entry removes only that history item, not the underlying workspace.
 Ingest runs as a background job on the desktop and local-server modes. The job
 status is held by the running process; restart recovery of queued UI jobs is not
 implemented. Committed ingest runs remain durable in workspace storage.
+
+Ingest draft generation creates structured entity and concept pages with
+evidence-backed sections, tags, aliases, and validated related-page names. The
+source page links back to the pages extracted from it, and `wiki/index.md` is
+regenerated from the complete page set in the same run. When a later source
+matches an existing page, its metadata is merged and the new evidence is
+appended in a source-attributed section.
+The extraction pipeline has no fixed entity/concept page limit. See
+[docs/ingest-extraction.md](docs/ingest-extraction.md) for the inventory,
+merging, batching, and provenance model.
+
+## Logs
+
+Desktop and local-server processes write daily JSON-ish text logs to:
+
+```text
+~/.corpusbot/logs/corpusbot.log.YYYY-MM-DD
+```
+
+Logs are buffered, written at `info` level by default, and respect `RUST_LOG`.
+The rolling appender retains the latest 14 daily files. Audit request/response
+artifacts and workflow events remain separate under each workspace's
+`.wiki-db/audit/<run-id>/`.
 
 ## CLI workflow
 
@@ -127,6 +151,8 @@ The MVP uses Chat Completions-compatible endpoints and requires typed JSON
 responses. Automation scripts may read provider environment variables only to
 seed an isolated temporary settings file; they do not turn those variables into
 runtime overrides.
+Connection test behavior and reasoning-model failure notes are documented in
+[docs/llm-connection-test.md](docs/llm-connection-test.md).
 
 ## MVP citation evaluation
 

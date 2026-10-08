@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
-use corpusbot_agent::{DraftPlan, LlmClient, SourceAgent};
+use corpusbot_agent::{ConceptDraft, DraftPlan, DraftSection, EntityDraft, LlmClient, SourceAgent};
 use corpusbot_core::{
-    Frontmatter, IsoDate, PageIdentity, PageType, ResourceId, ResourceRevision, Revision,
-    SourceRef, WikiDoc, Wikilink,
+    Frontmatter, IsoDate, PageIdentity, PageType, RawReference, ResourceId, ResourceRevision,
+    Revision, SourceRef, WikiDoc, Wikilink, split_raw_markdown,
 };
 use corpusbot_store::{PageFile, SourceRow, Workspace};
 use serde::Serialize;
@@ -12,6 +13,32 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::error::{IngestError, Result};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestStage {
+    Analyze,
+    Draft,
+    Commit,
+}
+
+impl IngestStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Analyze => "analyze",
+            Self::Draft => "draft",
+            Self::Commit => "commit",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct IngestProgressUpdate {
+    pub stage: IngestStage,
+    pub run_id: String,
+}
+
+pub type IngestProgressCallback = Arc<dyn Fn(IngestProgressUpdate) + Send + Sync>;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(
@@ -38,6 +65,7 @@ pub enum IngestResult {
 
 pub struct Ingestor<C> {
     agent: SourceAgent<C>,
+    progress: Option<IngestProgressCallback>,
 }
 
 impl<C> Ingestor<C>
@@ -47,6 +75,26 @@ where
     pub fn new(client: C) -> Self {
         Self {
             agent: SourceAgent::new(client),
+            progress: None,
+        }
+    }
+
+    pub fn with_max_draft_tokens(mut self, max_draft_tokens: u64) -> Self {
+        self.agent = self.agent.with_max_draft_tokens(max_draft_tokens);
+        self
+    }
+
+    pub fn with_progress(mut self, progress: IngestProgressCallback) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    fn report_progress(&self, stage: IngestStage, run_id: &str) {
+        if let Some(progress) = &self.progress {
+            progress(IngestProgressUpdate {
+                stage,
+                run_id: run_id.to_owned(),
+            });
         }
     }
 
@@ -115,6 +163,11 @@ where
             now,
         )?;
 
+        // Keep the raw file unchanged, but don't let its frontmatter leak into
+        // LLM analysis and generation prompts.
+        let source_markdown = split_raw_markdown(&markdown).body;
+
+        self.report_progress(IngestStage::Analyze, &run_id);
         let analysis = self
             .agent
             .analyze_source_audited(
@@ -122,11 +175,12 @@ where
                 &run_id,
                 baseline.manifest_id(),
                 &source_version_id,
-                &markdown,
+                &source_markdown,
             )
             .await?;
         let existing = existing_pages(workspace)?;
         let related = related_pages(&existing);
+        self.report_progress(IngestStage::Draft, &run_id);
         let plan = self
             .agent
             .generate_drafts_audited(
@@ -135,21 +189,65 @@ where
                 baseline.manifest_id(),
                 workspace.template(),
                 &analysis.title,
-                &markdown,
+                &source_markdown,
                 &analysis,
                 &related,
             )
             .await?;
         validate_plan(&plan, 1)?;
+        self.report_progress(IngestStage::Commit, &run_id);
 
         let source_page = format!("wiki/sources/{source_version_id}.md");
         let source_ref = SourceRef::new(&source_version_id, &analysis.title)?;
+        let raw_reference =
+            RawReference::new(&raw_path, original_name, &sha256, markdown.len() as u64)?;
         let source_link = Wikilink::new(&source_page)?;
         let source_title = format!("{} ({})", analysis.title, &source_version_id[4..16]);
-        let source_body = format!(
-            "# {}\n\n{}\n\n## Captured source\n\nOriginal file: `{original_name}`\n",
-            analysis.title, analysis.summary
-        );
+        let entities = unique_entities(workspace.template(), &plan)?;
+        let concepts = unique_concepts(workspace.template(), &plan)?;
+        let mut entity_pages = Vec::new();
+        for entity in &entities {
+            let path = existing
+                .get(
+                    &PageIdentity::new(workspace.template(), PageType::Entity, &entity.name)?.key(),
+                )
+                .map(|page| page.path.clone())
+                .unwrap_or_else(|| unique_path(workspace, PageType::Entity, &entity.name));
+            entity_pages.push((path, entity.name.clone()));
+        }
+        let mut concept_pages = Vec::new();
+        for concept in &concepts {
+            let path = existing
+                .get(
+                    &PageIdentity::new(workspace.template(), PageType::Concept, &concept.name)?
+                        .key(),
+                )
+                .map(|page| page.path.clone())
+                .unwrap_or_else(|| unique_path(workspace, PageType::Concept, &concept.name));
+            concept_pages.push((path, concept.name.clone()));
+        }
+        let mut related_pages = RelatedPages::new(workspace.template());
+        for page in existing.values() {
+            related_pages.insert(
+                page.document.frontmatter().page_type(),
+                page.document.frontmatter().title(),
+                &page.path,
+            );
+        }
+        for (path, title) in &entity_pages {
+            related_pages.insert(PageType::Entity, title, path);
+        }
+        for (path, title) in &concept_pages {
+            related_pages.insert(PageType::Concept, title, path);
+        }
+        let source_body = render_source_body(
+            &analysis.title,
+            &analysis.summary,
+            &entity_pages,
+            &concept_pages,
+            &raw_path,
+            original_name,
+        )?;
         let source_markdown = render_page(
             workspace,
             &source_page,
@@ -160,6 +258,7 @@ where
             vec![],
             vec![],
             vec![source_ref.clone()],
+            Some(raw_reference),
             &source_body,
         )?;
 
@@ -171,6 +270,9 @@ where
         files.insert(raw_path.clone(), markdown.clone().into_bytes());
         created.push(raw_path.clone());
         files.insert(source_page.clone(), source_markdown.clone().into_bytes());
+        touched.push(ResourceRevision::absent(ResourceId::page(
+            corpusbot_core::WikiPath::parse(&source_page)?,
+        )));
         pages.push(PageFile {
             path: source_page.clone(),
             markdown: source_markdown,
@@ -179,15 +281,14 @@ where
             updated_at: iso_date(now),
         });
 
-        for entity in &plan.entities {
+        for entity in &entities {
             let (path, markdown, is_new) = entity_page(
                 workspace,
                 &existing,
-                &entity.name,
-                &entity.aliases,
-                &entity.summary,
+                entity,
                 &source_ref,
                 &source_link,
+                &related_pages,
                 now,
             )?;
             let revision = if is_new {
@@ -214,14 +315,14 @@ where
             }
         }
 
-        for concept in &plan.concepts {
+        for concept in &concepts {
             let (path, markdown, is_new) = concept_page(
                 workspace,
                 &existing,
-                &concept.name,
-                &concept.definition,
+                concept,
                 &source_ref,
                 &source_link,
+                &related_pages,
                 now,
             )?;
             let revision = if is_new {
@@ -248,7 +349,20 @@ where
             }
         }
 
-        let index = render_index(&existing, &source_title, &source_page);
+        let mut index_pages = existing
+            .values()
+            .map(|page| {
+                (
+                    page.path.clone(),
+                    page.document.frontmatter().title().to_owned(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (path, title) in entity_pages.iter().chain(&concept_pages) {
+            index_pages.insert(path.clone(), title.clone());
+        }
+        index_pages.insert(source_page.clone(), source_title.clone());
+        let index = render_index(&index_pages);
         let log = append_log(workspace, &analysis.title, &source_version_id)?;
         let index_resource = ResourceId::index();
         let log_resource = ResourceId::log();
@@ -328,6 +442,36 @@ fn related_pages(existing: &BTreeMap<String, ExistingWikiPage>) -> Vec<(String, 
         .collect()
 }
 
+fn unique_entities(
+    template: corpusbot_core::Template,
+    plan: &DraftPlan,
+) -> Result<Vec<EntityDraft>> {
+    let mut selected = Vec::new();
+    let mut identities = BTreeMap::new();
+    for entity in &plan.entities {
+        let identity = PageIdentity::new(template, PageType::Entity, &entity.name)?;
+        if identities.insert(identity.key(), ()).is_none() {
+            selected.push(entity.clone());
+        }
+    }
+    Ok(selected)
+}
+
+fn unique_concepts(
+    template: corpusbot_core::Template,
+    plan: &DraftPlan,
+) -> Result<Vec<ConceptDraft>> {
+    let mut selected = Vec::new();
+    let mut identities = BTreeMap::new();
+    for concept in &plan.concepts {
+        let identity = PageIdentity::new(template, PageType::Concept, &concept.name)?;
+        if identities.insert(identity.key(), ()).is_none() {
+            selected.push(concept.clone());
+        }
+    }
+    Ok(selected)
+}
+
 fn validate_plan(plan: &DraftPlan, attempt: u32) -> Result<()> {
     if plan.source_summary.trim().is_empty() {
         return Err(IngestError::SelfAudit(format!(
@@ -361,6 +505,145 @@ fn validate_plan(plan: &DraftPlan, attempt: u32) -> Result<()> {
 struct ExistingWikiPage {
     path: String,
     document: WikiDoc,
+}
+
+struct RelatedPages {
+    template: corpusbot_core::Template,
+    paths: BTreeMap<String, Vec<(PageType, String)>>,
+}
+
+impl RelatedPages {
+    fn new(template: corpusbot_core::Template) -> Self {
+        Self {
+            template,
+            paths: BTreeMap::new(),
+        }
+    }
+
+    fn insert(&mut self, page_type: PageType, title: &str, path: &str) {
+        let Ok(identity) = PageIdentity::new(self.template, page_type, title) else {
+            return;
+        };
+        let candidates = self
+            .paths
+            .entry(identity.canonical_name().to_owned())
+            .or_default();
+        candidates.retain(|(candidate, _)| *candidate != page_type);
+        candidates.push((page_type, path.to_owned()));
+    }
+
+    fn resolve(&self, name: &str) -> Option<Wikilink> {
+        let normalized = PageIdentity::normalize(name).ok()?;
+        let candidates = self.paths.get(&normalized)?;
+        if candidates.len() != 1 {
+            return None;
+        }
+        let path = &candidates[0].1;
+        Wikilink::with_alias(path, name.trim()).ok()
+    }
+
+    fn resolve_all(&self, names: &[String]) -> Vec<Wikilink> {
+        let mut links = Vec::new();
+        for name in names {
+            if let Some(link) = self.resolve(name) {
+                push_wikilink(&mut links, &link);
+            }
+        }
+        links
+    }
+}
+
+fn render_sections(sections: &[DraftSection], heading_level: usize) -> String {
+    let prefix = "#".repeat(heading_level);
+    sections
+        .iter()
+        .map(|section| {
+            let mut output = format!("\n{prefix} {}\n\n", section.heading.trim());
+            for paragraph in &section.paragraphs {
+                let paragraph = paragraph.trim();
+                if !paragraph.is_empty() {
+                    output.push_str(paragraph);
+                    output.push_str("\n\n");
+                }
+            }
+            if !section.bullets.is_empty() {
+                for bullet in &section.bullets {
+                    let bullet = bullet.trim();
+                    if !bullet.is_empty() {
+                        output.push_str(&format!("- {bullet}\n"));
+                    }
+                }
+                output.push('\n');
+            }
+            output
+        })
+        .collect()
+}
+
+fn render_related_pages(links: &[Wikilink]) -> String {
+    if links.is_empty() {
+        return String::new();
+    }
+    let items = links
+        .iter()
+        .map(|link| format!("- {}\n", link.render()))
+        .collect::<String>();
+    format!("\n## Related pages\n\n{items}")
+}
+
+fn render_source_body(
+    title: &str,
+    summary: &str,
+    entities: &[(String, String)],
+    concepts: &[(String, String)],
+    raw_path: &str,
+    original_name: &str,
+) -> Result<String> {
+    let mut output = format!("# {title}\n\n{summary}\n");
+    if !entities.is_empty() || !concepts.is_empty() {
+        output.push_str("\n## Extracted pages\n");
+        if !entities.is_empty() {
+            output.push_str("\n### Entities\n");
+            for (path, name) in entities {
+                output.push_str(&format!("- [[{path}|{name}]]\n"));
+            }
+        }
+        if !concepts.is_empty() {
+            output.push_str("\n### Concepts\n");
+            for (path, name) in concepts {
+                output.push_str(&format!("- [[{path}|{name}]]\n"));
+            }
+        }
+    }
+    output.push_str("\n\n## Captured source\n\n");
+    output.push_str(&format!(
+        "Original file: {}\n",
+        Wikilink::with_alias(raw_path, original_name)?.render()
+    ));
+    Ok(output)
+}
+
+fn clean_tags(tags: &[String]) -> Vec<String> {
+    let mut clean = Vec::new();
+    for tag in tags {
+        let normalized = tag.trim().to_lowercase();
+        let tag = slugify(&normalized);
+        if !tag.is_empty() {
+            push_unique(&mut clean, tag);
+        }
+    }
+    clean
+}
+
+fn clean_aliases(aliases: &[String]) -> Result<Vec<String>> {
+    let mut clean = Vec::new();
+    for alias in aliases {
+        if alias.trim().is_empty() {
+            continue;
+        }
+        push_unique(&mut clean, PageIdentity::normalize(alias)?);
+    }
+    Ok(clean)
 }
 
 fn find_existing<'a>(
@@ -424,12 +707,14 @@ fn render_page(
     aliases: Vec<String>,
     related: Vec<Wikilink>,
     sources: Vec<SourceRef>,
+    raw: Option<RawReference>,
     body: &str,
 ) -> Result<String> {
     let date = IsoDate::parse(iso_date(now))?;
     let frontmatter = Frontmatter::new(
         page_type, title, date, date, tags, aliases, related, sources,
     )?;
+    let frontmatter = frontmatter.with_raw(raw)?;
     let wiki_path = corpusbot_core::WikiPath::parse(path)?;
     workspace
         .template()
@@ -445,17 +730,23 @@ fn render_page(
 fn entity_page(
     workspace: &Workspace,
     existing: &BTreeMap<String, ExistingWikiPage>,
-    name: &str,
-    aliases: &[String],
-    summary: &str,
+    entity: &EntityDraft,
     source_ref: &SourceRef,
     source_link: &Wikilink,
+    related_pages: &RelatedPages,
     now: OffsetDateTime,
 ) -> Result<(String, String, bool)> {
+    let name = entity.name.as_str();
+    let related_links = related_pages.resolve_all(&entity.related);
+    let tags = clean_tags(&entity.tags);
+    let aliases = clean_aliases(&entity.aliases)?;
     let Some(page) = find_existing(workspace, existing, PageType::Entity, name) else {
         let path = unique_path(workspace, PageType::Entity, name);
         let body = format!(
-            "# {name}\n\n{summary}\n\n## From {}\n\nSource: {}\n",
+            "# {name}\n\n{}\n{}{}\n\n## From {}\n\nSource: {}\n",
+            entity.summary,
+            render_sections(&entity.sections, 2),
+            render_related_pages(&related_links),
             source_ref.title(),
             source_link.render()
         );
@@ -465,10 +756,17 @@ fn entity_page(
             PageType::Entity,
             name,
             now,
-            vec![],
-            aliases.to_vec(),
-            vec![source_link.clone()],
+            tags,
+            aliases,
+            {
+                let mut related = vec![source_link.clone()];
+                for link in related_links {
+                    push_wikilink(&mut related, &link);
+                }
+                related
+            },
             vec![source_ref.clone()],
+            None,
             &body,
         )?;
         return Ok((path, markdown, true));
@@ -477,16 +775,25 @@ fn entity_page(
     let old = page.document.clone();
     let old_frontmatter = old.frontmatter();
     let mut tags = old_frontmatter.tags().to_vec();
-    let aliases = old_frontmatter.aliases().to_vec();
-    let mut normalized_aliases = Vec::with_capacity(aliases.len());
+    for tag in clean_tags(&entity.tags) {
+        push_unique(&mut tags, tag);
+    }
+    let mut normalized_aliases = old_frontmatter.aliases().to_vec();
+    for alias in clean_aliases(&entity.aliases)? {
+        push_unique(&mut normalized_aliases, alias);
+    }
     let mut related = old_frontmatter.related().to_vec();
     let mut sources = old_frontmatter.sources().to_vec();
-    push_unique(&mut tags, "ingested".to_owned());
-    for alias in aliases {
-        push_unique(&mut normalized_aliases, PageIdentity::normalize(alias)?);
-    }
     push_wikilink(&mut related, source_link);
+    for link in related_links {
+        push_wikilink(&mut related, &link);
+    }
     push_source(&mut sources, source_ref.clone())?;
+    let source_update = format!(
+        "{}\n{}",
+        entity.summary,
+        render_sections(&entity.sections, 3)
+    );
     let date = IsoDate::parse(iso_date(now))?;
     let frontmatter = Frontmatter::new(
         PageType::Entity,
@@ -503,7 +810,7 @@ fn entity_page(
         serde_yaml::to_string(&frontmatter)?,
         old.body(),
         source_ref.title(),
-        summary,
+        source_update,
         source_link.render()
     );
     Ok((page.path.clone(), markdown, false))
@@ -513,16 +820,23 @@ fn entity_page(
 fn concept_page(
     workspace: &Workspace,
     existing: &BTreeMap<String, ExistingWikiPage>,
-    name: &str,
-    definition: &str,
+    concept: &ConceptDraft,
     source_ref: &SourceRef,
     source_link: &Wikilink,
+    related_pages: &RelatedPages,
     now: OffsetDateTime,
 ) -> Result<(String, String, bool)> {
+    let name = concept.name.as_str();
+    let related_links = related_pages.resolve_all(&concept.related);
+    let tags = clean_tags(&concept.tags);
+    let aliases = clean_aliases(&concept.aliases)?;
     let Some(page) = find_existing(workspace, existing, PageType::Concept, name) else {
         let path = unique_path(workspace, PageType::Concept, name);
         let body = format!(
-            "# {name}\n\n{definition}\n\n## From {}\n\nSource: {}\n",
+            "# {name}\n\n{}\n{}{}\n\n## From {}\n\nSource: {}\n",
+            concept.definition,
+            render_sections(&concept.sections, 2),
+            render_related_pages(&related_links),
             source_ref.title(),
             source_link.render()
         );
@@ -532,10 +846,17 @@ fn concept_page(
             PageType::Concept,
             name,
             now,
-            vec![],
-            vec![],
-            vec![source_link.clone()],
+            tags,
+            aliases,
+            {
+                let mut related = vec![source_link.clone()];
+                for link in related_links {
+                    push_wikilink(&mut related, &link);
+                }
+                related
+            },
             vec![source_ref.clone()],
+            None,
             &body,
         )?;
         return Ok((path, markdown, true));
@@ -544,11 +865,25 @@ fn concept_page(
     let old = page.document.clone();
     let old_frontmatter = old.frontmatter();
     let mut tags = old_frontmatter.tags().to_vec();
+    for tag in clean_tags(&concept.tags) {
+        push_unique(&mut tags, tag);
+    }
+    let mut aliases = old_frontmatter.aliases().to_vec();
+    for alias in clean_aliases(&concept.aliases)? {
+        push_unique(&mut aliases, alias);
+    }
     let mut related = old_frontmatter.related().to_vec();
     let mut sources = old_frontmatter.sources().to_vec();
-    push_unique(&mut tags, "ingested".to_owned());
     push_wikilink(&mut related, source_link);
+    for link in related_links {
+        push_wikilink(&mut related, &link);
+    }
     push_source(&mut sources, source_ref.clone())?;
+    let source_update = format!(
+        "{}\n{}",
+        concept.definition,
+        render_sections(&concept.sections, 3)
+    );
     let date = IsoDate::parse(iso_date(now))?;
     let frontmatter = Frontmatter::new(
         PageType::Concept,
@@ -556,7 +891,7 @@ fn concept_page(
         old_frontmatter.created(),
         date,
         tags,
-        old_frontmatter.aliases().to_vec(),
+        aliases,
         related,
         sources,
     )?;
@@ -565,36 +900,39 @@ fn concept_page(
         serde_yaml::to_string(&frontmatter)?,
         old.body(),
         source_ref.title(),
-        definition,
+        source_update,
         source_link.render()
     );
     Ok((page.path.clone(), markdown, false))
 }
 
-fn render_index(
-    existing: &BTreeMap<String, ExistingWikiPage>,
-    source_title: &str,
-    source_page: &str,
-) -> String {
-    let mut lines = vec!["# Index".to_owned(), String::new()];
-    lines.push(format!("- [[{source_page}|{source_title}]]"));
-    let mut pages = existing
-        .values()
-        .map(|page| {
-            (
-                page.path.clone(),
-                page.document.frontmatter().title().to_owned(),
-            )
-        })
-        .collect::<Vec<_>>();
-    pages.sort_by(|left, right| {
-        left.1
-            .to_lowercase()
-            .cmp(&right.1.to_lowercase())
-            .then(left.0.cmp(&right.0))
-    });
+fn render_index(pages: &BTreeMap<String, String>) -> String {
+    let mut groups = BTreeMap::<String, Vec<(String, String)>>::new();
     for (path, title) in pages {
-        lines.push(format!("- [[{path}|{title}]]"));
+        let directory = path.split('/').take(2).collect::<Vec<_>>().join("/");
+        groups
+            .entry(directory)
+            .or_default()
+            .push((path.clone(), title.clone()));
+    }
+
+    let mut lines = vec!["# Index".to_owned()];
+    for (directory, mut group) in groups {
+        group.sort_by(|left, right| {
+            left.1
+                .to_lowercase()
+                .cmp(&right.1.to_lowercase())
+                .then(left.0.cmp(&right.0))
+        });
+        lines.push(String::new());
+        lines.push(format!(
+            "## {}",
+            directory.strip_prefix("wiki/").unwrap_or(&directory)
+        ));
+        lines.push(String::new());
+        for (path, title) in group {
+            lines.push(format!("- [[{path}|{title}]]"));
+        }
     }
     lines.join("\n") + "\n"
 }
@@ -682,12 +1020,115 @@ Raft elects a leader before replicating log entries. A candidate needs a majorit
     const DRAFTS: &str = r#"{
       "source_summary": "Raft is a leader-based consensus algorithm.",
       "entities": [
-        {"name": "Raft", "aliases": ["Raft consensus"], "summary": "A leader-based consensus algorithm."}
+        {
+          "name": "Raft",
+          "aliases": ["Raft consensus"],
+          "summary": "A leader-based consensus algorithm used to coordinate replicated state.",
+          "tags": ["consensus"],
+          "related": ["Leader Election"],
+          "sections": [
+            {
+              "heading": "Role",
+              "paragraphs": ["Raft coordinates a replicated state machine through an elected leader."]
+            },
+            {
+              "heading": "Evidence",
+              "bullets": ["A candidate needs a majority of votes."]
+            }
+          ]
+        }
       ],
       "concepts": [
-        {"name": "Leader Election", "definition": "The process of selecting a coordinator."}
+        {
+          "name": "Leader Election",
+          "definition": "The process of selecting a coordinator for replicated log entries.",
+          "aliases": ["leader selection"],
+          "tags": ["consensus", "election"],
+          "related": ["Raft"],
+          "sections": [
+            {
+              "heading": "Mechanism",
+              "paragraphs": ["Candidates request votes and become leader after winning a majority."]
+            },
+            {
+              "heading": "Failure behavior",
+              "bullets": ["A candidate without a majority cannot become leader."]
+            }
+          ]
+        }
       ]
     }"#;
+
+    #[tokio::test]
+    async fn reports_real_workflow_stages() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        corpusbot_store::Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        let source = root.path().join("raft.md");
+        std::fs::write(&source, SOURCE)?;
+
+        let stages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let callback_stages = std::sync::Arc::clone(&stages);
+        let ingestor = Ingestor::new(FakeLlmClient::new([ANALYSIS, DRAFTS])).with_progress(
+            std::sync::Arc::new(move |update: IngestProgressUpdate| {
+                callback_stages
+                    .lock()
+                    .expect("progress mutex")
+                    .push((update.stage, update.run_id));
+            }),
+        );
+
+        let result = ingestor.ingest_file(&workspace, &source).await?;
+        assert!(matches!(result, IngestResult::Committed { .. }));
+        let stages = stages.lock().expect("progress mutex").clone();
+        assert_eq!(
+            stages,
+            vec![
+                (IngestStage::Analyze, stages[0].1.clone()),
+                (IngestStage::Draft, stages[0].1.clone()),
+                (IngestStage::Commit, stages[0].1.clone()),
+            ]
+        );
+        assert!(
+            stages
+                .iter()
+                .all(|(_, run_id)| run_id.starts_with("ingest_"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strips_frontmatter_from_llm_prompts() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        corpusbot_store::Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        let source = root.path().join("raft.md");
+        std::fs::write(
+            &source,
+            "---\ninternal_note: keep out of prompts\n---\n\n# Raft\n\nRaft elects a leader.",
+        )?;
+
+        let client = FakeLlmClient::new([ANALYSIS, DRAFTS]);
+        let calls_client = client.clone();
+        let result = Ingestor::new(client)
+            .ingest_file(&workspace, &source)
+            .await?;
+        assert!(matches!(result, IngestResult::Committed { .. }));
+
+        let prompts = calls_client
+            .calls()
+            .into_iter()
+            .filter(|request| request.operation != "connection-test")
+            .map(|request| request.prompt)
+            .collect::<Vec<_>>();
+        assert_eq!(prompts.len(), 2);
+        assert!(
+            prompts
+                .iter()
+                .all(|prompt| { !prompt.contains("internal_note") && prompt.contains("# Raft") })
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn ingests_a_file_once() -> Result<()> {
@@ -717,6 +1158,10 @@ Raft elects a leader before replicating log entries. A candidate needs a majorit
             std::fs::read(root.path().join(&raw_path))?,
             SOURCE.as_bytes()
         );
+        let source_markdown = std::fs::read_to_string(root.path().join(&source_page))?;
+        assert!(source_markdown.contains(&format!("path: {raw_path}")));
+        assert!(source_markdown.contains(&hex(SOURCE.as_bytes())));
+        assert!(source_markdown.contains(&format!("Original file: [[{raw_path}|raft.md]]")));
         assert!(
             root.path()
                 .join("wiki/concepts/leader-election.md")

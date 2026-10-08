@@ -9,6 +9,61 @@ pub struct SourceRef {
     title: String,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct RawReference {
+    path: String,
+    original_name: String,
+    sha256: String,
+    size: u64,
+}
+
+impl RawReference {
+    pub fn new(
+        path: impl Into<String>,
+        original_name: impl Into<String>,
+        sha256: impl Into<String>,
+        size: u64,
+    ) -> Result<Self> {
+        let path = path.into();
+        let original_name = original_name.into();
+        let sha256 = sha256.into();
+        if path.trim().is_empty() || !path.trim().starts_with("raw/") {
+            return Err(CoreError::Frontmatter(
+                "raw reference path must start with raw/".into(),
+            ));
+        }
+        if original_name.trim().is_empty() || original_name.contains(['/', '\\', '\0']) {
+            return Err(CoreError::Frontmatter("invalid raw file name".into()));
+        }
+        if !is_sha256(&sha256) {
+            return Err(CoreError::Frontmatter("invalid raw SHA-256".into()));
+        }
+
+        Ok(Self {
+            path: path.trim().to_owned(),
+            original_name: original_name.trim().to_owned(),
+            sha256: sha256.trim().to_lowercase(),
+            size,
+        })
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn original_name(&self) -> &str {
+        &self.original_name
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
 impl SourceRef {
     pub fn new(source_version_id: impl Into<String>, title: impl Into<String>) -> Result<Self> {
         let source_version_id = source_version_id.into();

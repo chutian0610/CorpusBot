@@ -323,8 +323,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Ingest { root, file } => {
             let workspace = workspace(&root)?;
-            let client = RigLlmClient::new(provider_config()?)?;
-            let result = Ingestor::new(client).ingest_file(&workspace, &file).await?;
+            let provider = provider_config()?;
+            let client = RigLlmClient::new(provider.clone())?;
+            let result = Ingestor::new(client)
+                .with_max_draft_tokens(provider.max_draft_tokens)
+                .ingest_file(&workspace, &file)
+                .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Query {
