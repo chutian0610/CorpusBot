@@ -32,6 +32,12 @@ export type WikiPage = WikiPageSummary & {
   related: string[];
   sources: string[];
   sourceReferences: { sourceVersionId: string; title: string }[];
+  raw?: {
+    path: string;
+    originalName: string;
+    sha256: string;
+    size: number;
+  } | null;
   markdown: string;
   body: string;
 };
@@ -86,6 +92,9 @@ export type IngestAuditEvent = {
   latencyMs?: number | null;
   tokensIn?: number | null;
   tokensOut?: number | null;
+  maxTokens?: number | null;
+  finishReason?: string | null;
+  truncated?: boolean | null;
   decision?: string | null;
   errorCode?: string | null;
 };
@@ -93,15 +102,16 @@ export type IngestAuditEvent = {
 export type IngestRunDetail = IngestRunRow & {
   sourcePage?: string | null;
   sourcePageMarkdown?: string | null;
-  originalMarkdown?: string | null;
-  originalMarkdownTruncated: boolean;
   events: IngestAuditEvent[];
 };
 
 export type IngestJob = {
   jobId: string;
+  root: string;
   fileName: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | string;
+  stage?: string | null;
+  runId?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
   result?: IngestResult | null;
@@ -131,7 +141,7 @@ export type RawSource = {
   path: string;
   originalName: string;
   size: number;
-  markdown: string;
+  body: string;
 };
 
 export type Citation = {
@@ -187,6 +197,7 @@ export type SettingsSummary = {
   hasApiKey: boolean;
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
+  maxDraftTokens?: number | null;
 };
 
 export type SettingsInput = {
@@ -195,6 +206,11 @@ export type SettingsInput = {
   apiKey?: string | null;
   gitAuthorName?: string | null;
   gitAuthorEmail?: string | null;
+  maxDraftTokens?: number | null;
+};
+
+export type SettingsForm = Omit<SettingsInput, 'maxDraftTokens'> & {
+  maxDraftTokens: string;
 };
 
 export type ConnectionTestResult = {

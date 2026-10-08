@@ -6,6 +6,7 @@ use crate::error::{CoreError, Result};
 use crate::identity::PageIdentity;
 use crate::link::Wikilink;
 use crate::page_type::PageType;
+use crate::source::RawReference;
 use crate::source::SourceRef;
 use crate::template::Template;
 
@@ -16,10 +17,16 @@ pub struct Frontmatter {
     title: String,
     created: IsoDate,
     updated: IsoDate,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     tags: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     aliases: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     related: Vec<Wikilink>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     sources: Vec<SourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    raw: Option<RawReference>,
 }
 
 impl Frontmatter {
@@ -74,7 +81,18 @@ impl Frontmatter {
             aliases: clean_aliases,
             related,
             sources,
+            raw: None,
         })
+    }
+
+    pub fn with_raw(mut self, raw: Option<RawReference>) -> Result<Self> {
+        if raw.is_some() && self.page_type != PageType::Source {
+            return Err(CoreError::Frontmatter(
+                "only source pages can reference captured raw files".into(),
+            ));
+        }
+        self.raw = raw;
+        Ok(self)
     }
 
     pub fn imported_at_date() -> OffsetDateTime {
@@ -113,6 +131,10 @@ impl Frontmatter {
         &self.sources
     }
 
+    pub fn raw(&self) -> Option<&RawReference> {
+        self.raw.as_ref()
+    }
+
     pub fn identity(&self, template: Template) -> Result<PageIdentity> {
         PageIdentity::new(template, self.page_type, &self.title)
     }
@@ -148,6 +170,11 @@ mod tests {
         );
         assert_eq!(frontmatter.tags().len(), 1);
         assert_eq!(frontmatter.sources().len(), 0);
+        let yaml = serde_yaml::to_string(&frontmatter)?;
+        assert!(yaml.contains("tags:"));
+        assert!(!yaml.contains("aliases:"));
+        assert!(!yaml.contains("related:"));
+        assert!(!yaml.contains("sources:"));
         Ok(())
     }
 

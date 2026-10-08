@@ -1,17 +1,18 @@
 #![allow(clippy::needless_pass_by_value)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use time::OffsetDateTime;
 
 use corpusbot_agent::{
-    ConnectionTestResult, LlmClient, LlmRequest, QueryContextPage, RigLlmClient, SettingsInput,
-    SettingsSummary, SourceAgent, WorkflowAuditEvent, git_identity, provider_config,
+    ConnectionTestResult, LlmClient, QueryContextPage, RigLlmClient, SettingsInput,
+    SettingsSummary, SourceAgent, WorkflowAuditEvent, WorkflowNode, git_identity, provider_config,
     provider_config_for_settings,
 };
-use corpusbot_core::{Revision, Template, WikiDoc, Wikilink};
+use corpusbot_core::{Revision, Template, WikiDoc, Wikilink, split_raw_markdown};
 use corpusbot_ingest::Ingestor;
 use corpusbot_search::SearchIndex;
 use corpusbot_store::GitIdentity;
@@ -35,6 +36,7 @@ pub struct WorkspacePage {
     pub aliases: Vec<String>,
     pub sources: Vec<String>,
     pub source_references: Vec<SourceReferenceSummary>,
+    pub raw: Option<corpusbot_core::RawReference>,
     pub markdown: String,
     pub body: String,
 }
@@ -53,7 +55,7 @@ pub struct RawSource {
     pub path: String,
     pub original_name: String,
     pub size: u64,
-    pub markdown: String,
+    pub body: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +82,9 @@ pub struct IngestAuditEvent {
     pub latency_ms: Option<u64>,
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub finish_reason: Option<String>,
+    pub truncated: bool,
     pub decision: Option<String>,
     pub error_code: Option<String>,
 }
@@ -91,8 +96,6 @@ pub struct IngestRunDetail {
     pub run: corpusbot_store::IngestRunRow,
     pub source_page: Option<String>,
     pub source_page_markdown: Option<String>,
-    pub original_markdown: Option<String>,
-    pub original_markdown_truncated: bool,
     pub events: Vec<IngestAuditEvent>,
 }
 
@@ -100,8 +103,11 @@ pub struct IngestRunDetail {
 #[serde(rename_all = "camelCase")]
 pub struct IngestJob {
     pub job_id: String,
+    pub root: String,
     pub file_name: String,
     pub status: String,
+    pub stage: Option<String>,
+    pub run_id: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub result: Option<corpusbot_ingest::IngestResult>,
@@ -182,6 +188,7 @@ fn page_from_workspace(workspace: &Workspace, path: &str) -> Result<WorkspacePag
                 title: source.title().to_owned(),
             })
             .collect(),
+        raw: frontmatter.raw().cloned(),
         markdown,
         body: document.body().to_owned(),
     })
@@ -261,12 +268,76 @@ fn audit_event(event: WorkflowAuditEvent) -> IngestAuditEvent {
         latency_ms: event.latency_ms,
         tokens_in: event.tokens_in,
         tokens_out: event.tokens_out,
+        max_tokens: event.max_tokens,
+        finish_reason: event.finish_reason,
+        truncated: event.truncated,
         decision: event.decision,
         error_code: event.error_code,
     }
 }
 
 fn read_ingest_events(root: &Path, run_id: &str) -> Vec<IngestAuditEvent> {
+    fn workflow_node_file_name(node: WorkflowNode) -> &'static str {
+        match node {
+            WorkflowNode::Analyze => "analyze",
+            WorkflowNode::ValidateAnalysis => "validate-analysis",
+            WorkflowNode::RepairAnalysis => "repair-analysis",
+            WorkflowNode::RetrieveContext => "retrieve-context",
+            WorkflowNode::GenerateDraft => "generate-draft",
+            WorkflowNode::ValidateDraft => "validate-draft",
+            WorkflowNode::RepairDraft => "repair-draft",
+            WorkflowNode::SelfAudit => "self-audit",
+            WorkflowNode::Commit => "commit",
+        }
+    }
+
+    fn legacy_request_max_tokens(
+        root: &Path,
+        run_id: &str,
+        event: &WorkflowAuditEvent,
+    ) -> Option<u64> {
+        let request_path = root.join(".wiki-db/audit").join(run_id).join(format!(
+            "{}-{}-request.json",
+            workflow_node_file_name(event.node),
+            event.attempt
+        ));
+        let request =
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(request_path).ok()?)
+                .ok()?;
+        request["max_tokens"].as_u64()
+    }
+
+    fn normalize_legacy_audit_event(
+        mut event: WorkflowAuditEvent,
+        root: &Path,
+        run_id: &str,
+    ) -> WorkflowAuditEvent {
+        if event.finish_reason.is_some() {
+            return event;
+        }
+
+        event.max_tokens = event
+            .max_tokens
+            .or_else(|| legacy_request_max_tokens(root, run_id, &event));
+
+        // Older audit events did not persist finish_reason. A schema rejection
+        // at the configured output cap is the legacy truncation signature.
+        let at_output_limit = event
+            .max_tokens
+            .zip(event.tokens_out)
+            .is_some_and(|(max_tokens, tokens_out)| tokens_out >= max_tokens);
+        let schema_rejected = event
+            .decision
+            .as_deref()
+            .is_some_and(|decision| decision.contains("schema rejected"));
+        if at_output_limit && schema_rejected {
+            event.finish_reason = Some("length".to_owned());
+            event.truncated = true;
+        }
+
+        event
+    }
+
     if run_id.is_empty() || run_id.contains(['/', '\\', '\0']) {
         return Vec::new();
     }
@@ -279,8 +350,100 @@ fn read_ingest_events(root: &Path, run_id: &str) -> Vec<IngestAuditEvent> {
     };
     raw.lines()
         .filter_map(|line| serde_json::from_str::<WorkflowAuditEvent>(line).ok())
-        .map(audit_event)
+        .map(|event| audit_event(normalize_legacy_audit_event(event, root, run_id)))
         .collect()
+}
+
+fn filesystem_timestamp(path: &Path) -> String {
+    let metadata = std::fs::metadata(path).ok();
+    let system_time = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.created().ok())
+        .or_else(|| metadata.and_then(|metadata| metadata.modified().ok()))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    OffsetDateTime::from(system_time)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".to_owned())
+}
+
+fn failed_audit_run(
+    root: &Path,
+    run_id: &str,
+    events: &[IngestAuditEvent],
+) -> Option<corpusbot_store::IngestRunRow> {
+    if run_id.is_empty()
+        || events.is_empty()
+        || !events
+            .iter()
+            .any(|event| matches!(event.status.as_str(), "failed" | "attempts_exhausted"))
+    {
+        return None;
+    }
+
+    let directory = root.join(".wiki-db/audit").join(run_id);
+    let timestamp = filesystem_timestamp(&directory);
+    let manifest_id = events
+        .iter()
+        .find_map(|event| event.input_manifest_id.clone())
+        .unwrap_or_default();
+
+    Some(corpusbot_store::IngestRunRow {
+        run_id: run_id.to_owned(),
+        source_id: format!("audit_{run_id}"),
+        status: "failed".to_owned(),
+        baseline_snapshot_id: "unavailable".to_owned(),
+        baseline_manifest_id: manifest_id,
+        touched_resources: Vec::new(),
+        created_at: timestamp.clone(),
+        finished_at: Some(timestamp),
+        original_name: None,
+        source_version_id: None,
+        sha256: None,
+        size: None,
+    })
+}
+
+fn failed_audit_ingest_runs(
+    root: &Path,
+    known_run_ids: &HashSet<String>,
+    failed_jobs: &[IngestJob],
+    limit: usize,
+) -> Vec<corpusbot_store::IngestRunRow> {
+    let audit_dir = root.join(".wiki-db/audit");
+    let Ok(entries) = std::fs::read_dir(audit_dir) else {
+        return Vec::new();
+    };
+
+    let mut runs = entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .filter(|run_id| run_id.starts_with("ingest_") && !known_run_ids.contains(run_id))
+        .filter_map(|run_id| {
+            let events = read_ingest_events(root, &run_id);
+            failed_audit_run(root, &run_id, &events).map(|mut run| {
+                run.original_name = failed_jobs
+                    .iter()
+                    .find(|job| job.run_id.as_deref() == Some(run_id.as_str()))
+                    .map(|job| job.file_name.clone());
+                run.created_at = filesystem_timestamp(
+                    &root
+                        .join(".wiki-db/audit")
+                        .join(&run_id)
+                        .join("events.jsonl"),
+                );
+                run.finished_at = Some(run.created_at.clone());
+                run
+            })
+        })
+        .collect::<Vec<_>>();
+    runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    runs.truncate(limit);
+    runs
 }
 
 #[tauri::command]
@@ -341,13 +504,14 @@ pub fn read_raw_source(
     corpusbot_core::ResourceId::new(&path).map_err(|error| CommandError(error.to_string()))?;
     let markdown = std::fs::read_to_string(workspace.paths().root.join(&path))
         .map_err(|error| CommandError(error.to_string()))?;
+    let raw = split_raw_markdown(&markdown);
 
     Ok(Some(RawSource {
         source_version_id: source.source_version_id,
         path,
         original_name: source.original_name,
         size: source.size,
-        markdown,
+        body: raw.body,
     }))
 }
 
@@ -373,28 +537,56 @@ pub(crate) fn update_ingest_job(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn start_ingest_job(
     app: Option<AppHandle>,
     store: IngestJobStore,
     root: PathBuf,
     file_name: String,
     markdown: String,
+    max_draft_tokens: u64,
     llm_client: impl LlmClient + 'static,
 ) -> Result<IngestJob, CommandError> {
     let job_id = Uuid::new_v4().to_string();
     let now = now_ms();
     let job = IngestJob {
         job_id: job_id.clone(),
+        root: root.to_string_lossy().to_string(),
         file_name: file_name.clone(),
         status: "queued".to_owned(),
+        stage: None,
+        run_id: None,
         created_at_ms: now,
         updated_at_ms: now,
         result: None,
         error: None,
     };
     update_ingest_job(&store, job.clone(), app.as_ref());
+    tracing::info!(
+        job_id = %job.job_id,
+        root = %root.display(),
+        file_name = %file_name,
+        "ingest job queued"
+    );
 
     let ingest_lock = store.ingest_lock.clone();
+    let progress_store = store.clone();
+    let progress_job_id = job_id.clone();
+    let progress: corpusbot_ingest::IngestProgressCallback = Arc::new(move |update| {
+        if let Ok(mut jobs) = progress_store.jobs.lock()
+            && let Some(job) = jobs.get_mut(&progress_job_id)
+        {
+            job.stage = Some(update.stage.as_str().to_owned());
+            job.run_id = Some(update.run_id.clone());
+            job.updated_at_ms = now_ms();
+            tracing::debug!(
+                job_id = %progress_job_id,
+                stage = update.stage.as_str(),
+                run_id = %update.run_id,
+                "ingest progress"
+            );
+        }
+    });
     let queued_job = job.clone();
     let response_job = job.clone();
     tokio::task::spawn_blocking(move || {
@@ -402,6 +594,7 @@ pub(crate) async fn start_ingest_job(
             &store,
             IngestJob {
                 status: "running".to_owned(),
+                stage: Some("prepare".to_owned()),
                 ..queued_job
             },
             None,
@@ -417,30 +610,86 @@ pub(crate) async fn start_ingest_job(
             runtime
                 .block_on(async {
                     Ingestor::new(llm_client)
+                        .with_max_draft_tokens(max_draft_tokens)
+                        .with_progress(progress.clone())
                         .ingest_content(&workspace, &file_name, &markdown)
                         .await
                 })
                 .map_err(|error| error.to_string())
         })();
 
+        let (stage, run_id) = store
+            .jobs
+            .lock()
+            .ok()
+            .and_then(|jobs| {
+                jobs.get(&job_id)
+                    .map(|job| (job.stage.clone(), job.run_id.clone()))
+            })
+            .unwrap_or_else(|| (job.stage.clone(), job.run_id.clone()));
         let finished = match outcome {
             Ok(result) => IngestJob {
                 status: "succeeded".to_owned(),
                 result: Some(result),
                 error: None,
+                stage,
+                run_id,
                 ..job.clone()
             },
             Err(error) => IngestJob {
                 status: "failed".to_owned(),
                 error: Some(error),
                 result: None,
+                stage,
+                run_id,
                 ..job.clone()
             },
         };
         update_ingest_job(&store, finished, app.as_ref());
+        let final_status = store
+            .jobs
+            .lock()
+            .ok()
+            .and_then(|jobs| {
+                jobs.get(&job_id)
+                    .map(|job| (job.status.clone(), job.error.clone()))
+            })
+            .unwrap_or_default();
+        if final_status.0 == "failed" {
+            tracing::error!(
+                job_id = %job_id,
+                error = final_status.1.as_deref().unwrap_or_default(),
+                "ingest job failed"
+            );
+        } else {
+            tracing::info!(
+                job_id = %job_id,
+                status = %final_status.0,
+                "ingest job finished"
+            );
+        }
     });
 
     Ok(response_job)
+}
+
+pub(crate) fn list_visible_ingest_jobs(store: &IngestJobStore, root: &Path) -> Vec<IngestJob> {
+    let root = root.to_string_lossy();
+    let mut jobs = store
+        .jobs
+        .lock()
+        .map(|jobs| {
+            jobs.values()
+                .filter(|job| {
+                    job.root == root
+                        && ["queued", "running", "failed"].contains(&job.status.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    jobs.sort_by_key(|job| job.created_at_ms);
+    jobs
 }
 
 #[tauri::command]
@@ -451,14 +700,16 @@ pub async fn start_ingest_content(
     file_name: String,
     markdown: String,
 ) -> Result<IngestJob, CommandError> {
-    let client =
-        RigLlmClient::new(provider_config().map_err(|error| CommandError(error.to_string()))?)?;
+    let provider_config = provider_config().map_err(|error| CommandError(error.to_string()))?;
+    let client = RigLlmClient::new(provider_config.clone())
+        .map_err(|error| CommandError(error.to_string()))?;
     start_ingest_job(
         Some(app),
         state.inner().clone(),
         root,
         file_name,
         markdown,
+        provider_config.max_draft_tokens,
         client,
     )
     .await
@@ -474,6 +725,11 @@ pub async fn get_ingest_job(
         .lock()
         .ok()
         .and_then(|jobs| jobs.get(&job_id).cloned()))
+}
+
+#[tauri::command]
+pub fn list_ingest_jobs(state: State<'_, IngestJobStore>, root: PathBuf) -> Vec<IngestJob> {
+    list_visible_ingest_jobs(state.inner(), &root)
 }
 
 #[tauri::command]
@@ -579,12 +835,40 @@ pub fn list_documents(root: PathBuf) -> Result<Vec<DocumentSummary>, CommandErro
 
 #[tauri::command]
 pub fn list_ingest_runs(
+    state: State<'_, IngestJobStore>,
     root: PathBuf,
     limit: Option<usize>,
 ) -> Result<Vec<corpusbot_store::IngestRunRow>, CommandError> {
-    workspace(&root)?
-        .ingest_runs(limit.unwrap_or(50))
-        .map_err(|error| CommandError(error.to_string()))
+    list_ingest_runs_for_store(state.inner(), root, limit)
+}
+
+pub(crate) fn list_ingest_runs_for_store(
+    store: &IngestJobStore,
+    root: PathBuf,
+    limit: Option<usize>,
+) -> Result<Vec<corpusbot_store::IngestRunRow>, CommandError> {
+    let limit = limit.unwrap_or(50);
+    let workspace = workspace(&root)?;
+    let mut runs = workspace
+        .ingest_runs(limit)
+        .map_err(|error| CommandError(error.to_string()))?;
+    let known_run_ids = runs
+        .iter()
+        .map(|run| run.run_id.clone())
+        .collect::<HashSet<_>>();
+    let failed_jobs = list_visible_ingest_jobs(store, &root)
+        .into_iter()
+        .filter(|job| job.status == "failed")
+        .collect::<Vec<_>>();
+    runs.extend(failed_audit_ingest_runs(
+        &root,
+        &known_run_ids,
+        failed_jobs.as_slice(),
+        limit,
+    ));
+    runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    runs.truncate(limit);
+    Ok(runs)
 }
 
 #[tauri::command]
@@ -597,7 +881,16 @@ pub fn read_ingest_run(
         .ingest_run(&run_id)
         .map_err(|error| CommandError(error.to_string()))?
     else {
-        return Ok(None);
+        let events = read_ingest_events(root.as_path(), &run_id);
+        let Some(run) = failed_audit_run(root.as_path(), &run_id, &events) else {
+            return Ok(None);
+        };
+        return Ok(Some(IngestRunDetail {
+            events,
+            run,
+            source_page: None,
+            source_page_markdown: None,
+        }));
     };
 
     let source_page = run
@@ -607,28 +900,12 @@ pub fn read_ingest_run(
     let source_page_markdown = source_page
         .as_ref()
         .and_then(|path| workspace.read_page(path).ok());
-    let original_markdown = run
-        .sha256
-        .as_ref()
-        .zip(run.original_name.as_ref())
-        .and_then(|(sha256, original_name)| {
-            let raw_path = format!("raw/{sha256}/{original_name}");
-            corpusbot_core::ResourceId::new(&raw_path).ok()?;
-            std::fs::read_to_string(workspace.paths().root.join(raw_path)).ok()
-        });
-    let original_markdown_truncated = original_markdown
-        .as_ref()
-        .is_some_and(|markdown| markdown.chars().count() > 48_000);
-    let original_markdown =
-        original_markdown.map(|markdown| markdown.chars().take(48_000).collect::<String>());
 
     Ok(Some(IngestRunDetail {
         events: read_ingest_events(workspace.paths().root.as_path(), &run_id),
         run,
         source_page,
         source_page_markdown,
-        original_markdown,
-        original_markdown_truncated,
     }))
 }
 
@@ -750,20 +1027,12 @@ where
     LlmClientT: LlmClient + 'static,
 {
     let started_at = std::time::Instant::now();
-    let request = LlmRequest {
-        operation: "connection-test".to_owned(),
-        system: String::new(),
-        prompt: "Reply with OK.".to_owned(),
-        prompt_template_id: "connection-test-v1".to_owned(),
-        temperature: None,
-        max_tokens: Some(1),
-    };
     let response = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        llm_client.complete(request),
+        std::time::Duration::from_secs(30),
+        llm_client.test_connection(),
     )
     .await
-    .map_err(|_| CommandError("provider request timed out after 15000ms".to_owned()))?
+    .map_err(|_| CommandError("provider request timed out after 30000ms".to_owned()))?
     .map_err(|error| CommandError(error.to_string()))?;
     Ok(ConnectionTestResult {
         provider: response.provider,
@@ -776,12 +1045,45 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use corpusbot_agent::AttemptStatus;
     use corpusbot_agent::Citation;
+    use corpusbot_agent::WorkflowNode;
     use corpusbot_core::Revision;
     use corpusbot_ingest::IngestResult;
     use corpusbot_lint::{LintIssue, LintReport, LintSummary, Severity};
     use corpusbot_store::{IngestRunRow, PageRow, SnapshotRow, TouchedResource, WorkspaceStatus};
     use serde_json::{Value, json};
+
+    #[test]
+    fn lists_only_active_jobs_for_selected_workspace() {
+        let store = IngestJobStore::default();
+        for (job_id, root, status) in [
+            ("running", "/tmp/one", "running"),
+            ("succeeded", "/tmp/one", "succeeded"),
+            ("other-root", "/tmp/two", "running"),
+        ] {
+            update_ingest_job(
+                &store,
+                IngestJob {
+                    job_id: job_id.to_owned(),
+                    root: root.to_owned(),
+                    file_name: format!("{job_id}.md"),
+                    status: status.to_owned(),
+                    stage: None,
+                    run_id: None,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                    result: None,
+                    error: None,
+                },
+                None,
+            );
+        }
+
+        let jobs = list_visible_ingest_jobs(&store, Path::new("/tmp/one"));
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, "running");
+    }
 
     #[test]
     fn page_commands_use_camel_case() -> Result<(), serde_json::Error> {
@@ -796,6 +1098,7 @@ mod tests {
             aliases: vec![],
             sources: vec![],
             source_references: vec![],
+            raw: None,
             markdown: "Raft".to_owned(),
             body: "Raft".to_owned(),
         })?;
@@ -899,13 +1202,10 @@ mod tests {
             },
             source_page: Some("wiki/sources/version.md".to_owned()),
             source_page_markdown: Some("# Source".to_owned()),
-            original_markdown: Some("# Raft".to_owned()),
-            original_markdown_truncated: false,
             events: vec![],
         })?;
         assert_eq!(detail["runId"], "run");
         assert_eq!(detail["originalName"], "raft.md");
-        assert_eq!(detail["originalMarkdownTruncated"], false);
         assert_eq!(detail["touchedResources"][0]["revisionKind"], "absent");
         Ok(())
     }
@@ -964,11 +1264,13 @@ mod tests {
             has_api_key: true,
             git_author_name: Some("CorpusBot".to_owned()),
             git_author_email: Some("corpusbot@local.invalid".to_owned()),
+            max_draft_tokens: Some(12000),
         })?;
         assert_eq!(settings["baseUrl"], "https://example.com/v1");
         assert_eq!(settings["model"], "mvp-mock");
         assert_eq!(settings["hasApiKey"], true);
         assert_eq!(settings["gitAuthorName"], "CorpusBot");
+        assert_eq!(settings["maxDraftTokens"], 12000);
 
         let input: SettingsInput = serde_json::from_value(json!({
             "baseUrl": "https://example.com/v1",
@@ -976,14 +1278,46 @@ mod tests {
             "apiKey": "secret",
             "gitAuthorName": "CorpusBot",
             "gitAuthorEmail": "corpusbot@local.invalid"
+            ,"maxDraftTokens": 15000
         }))?;
         assert_eq!(input.base_url.as_deref(), Some("https://example.com/v1"));
         assert_eq!(input.model.as_deref(), Some("mvp-mock"));
         assert_eq!(input.git_author_name.as_deref(), Some("CorpusBot"));
+        assert_eq!(input.max_draft_tokens, Some(15000));
 
         let empty: SettingsInput = serde_json::from_value(json!({}))?;
         assert_eq!(empty.base_url, None);
         assert_eq!(empty.model, None);
+        assert_eq!(empty.max_draft_tokens, None);
+        Ok(())
+    }
+
+    #[test]
+    fn normalizes_legacy_output_limit_audit_events()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let run_id = "legacy-run";
+        let audit_dir = root.path().join(".wiki-db/audit").join(run_id);
+        std::fs::create_dir_all(&audit_dir)?;
+
+        let mut event = WorkflowAuditEvent::start(run_id, WorkflowNode::GenerateDraft, 1);
+        event.status = AttemptStatus::ValidatorRejected;
+        event.tokens_out = Some(6000);
+        event.decision = Some("schema rejected".to_owned());
+        std::fs::write(
+            audit_dir.join("events.jsonl"),
+            serde_json::to_string(&event)?,
+        )?;
+        std::fs::write(
+            audit_dir.join("generate-draft-1-request.json"),
+            r#"{"max_tokens":6000}"#,
+        )?;
+
+        let events = read_ingest_events(root.path(), run_id);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].max_tokens, Some(6000));
+        assert_eq!(events[0].finish_reason.as_deref(), Some("length"));
+        assert!(events[0].truncated);
         Ok(())
     }
 

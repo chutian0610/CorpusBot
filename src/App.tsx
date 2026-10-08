@@ -311,7 +311,12 @@ function SettingsView() {
     const testId = ++connectionTestId.current;
     setConnectionTest({ status: 'testing' });
     try {
-      const result = await api.testLLMConnection(settingsForm);
+      const result = await api.testLLMConnection({
+        ...settingsForm,
+        maxDraftTokens: settingsForm.maxDraftTokens.trim()
+          ? Number(settingsForm.maxDraftTokens)
+          : null,
+      });
       if (testId === connectionTestId.current) {
         setConnectionTest({ status: 'success', result });
       }
@@ -343,6 +348,19 @@ function SettingsView() {
               Used to analyze sources and answer workspace questions.
             </p>
           </div>
+
+          <label className="block space-y-1 text-sm">
+            <span className="font-medium">Draft output token limit</span>
+            <input
+              type="number"
+              min={1024}
+              max={200000}
+              value={settingsForm.maxDraftTokens}
+              onChange={(event) => update({ maxDraftTokens: event.target.value })}
+              placeholder="12000"
+              className="w-full rounded-md border px-3 py-2"
+            />
+          </label>
 
           <label className="block space-y-1 text-sm">
             <span className="font-medium">Base URL</span>
@@ -415,7 +433,7 @@ function SettingsView() {
 
           <p className="text-xs text-stone-500">
             Leave Base URL and Model blank to use the built-in defaults. Leave API key blank to use
-            the saved key.
+            the saved key. Leave Draft output token limit blank to use 12000.
           </p>
         </section>
 

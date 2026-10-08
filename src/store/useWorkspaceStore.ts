@@ -7,7 +7,7 @@ import type {
   IngestJob,
   LintReport,
   QueryAnswer,
-  SettingsInput,
+  SettingsForm,
   SettingsSummary,
   SnapshotResult,
   SnapshotRow,
@@ -106,13 +106,13 @@ type WorkspaceState = {
   snapshots: SnapshotRow[];
   snapshotResult?: SnapshotResult;
   settings?: SettingsSummary;
-  settingsForm: SettingsInput;
+  settingsForm: SettingsForm;
   selectedSnapshotId?: string;
   setActiveView: (view: ViewId) => void;
   setError: (error?: string) => void;
   setQuestion: (question: string) => void;
   setSelectedSnapshotId: (snapshotId?: string) => void;
-  updateSettingsForm: (settings: Partial<SettingsInput>) => void;
+  updateSettingsForm: (settings: Partial<SettingsForm>) => void;
   initialize: (root: string, template: TemplateId) => Promise<void>;
   open: (root: string) => Promise<void>;
   removeRecentWorkspace: (root: string) => void;
@@ -121,6 +121,7 @@ type WorkspaceState = {
   selectPage: (path: string) => Promise<void>;
   importMarkdown: (fileName: string, markdown: string) => Promise<void>;
   watchIngestJob: (jobId: string) => Promise<void>;
+  loadIngestJobs: () => Promise<void>;
   loadDocuments: () => Promise<void>;
   loadRawSource: (sourceVersionId: string, path: string) => Promise<void>;
   loadIngestRuns: () => Promise<void>;
@@ -160,6 +161,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     apiKey: '',
     gitAuthorName: '',
     gitAuthorEmail: '',
+    maxDraftTokens: '',
   },
 
   setActiveView: (activeView) => set({ activeView }),
@@ -192,6 +194,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({ root, summary });
         await get().refresh();
         set({ recentWorkspaces: rememberWorkspace(root) });
+        await get().loadIngestJobs();
       } catch (error) {
         set({ error: error instanceof Error ? error.message : String(error) });
       } finally {
@@ -275,11 +278,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   watchIngestJob: async (jobId) => {
+    const workspaceRoot = get().root;
     const isActive = (job?: IngestJob) =>
       Boolean(job && ['queued', 'running'].includes(job.status));
 
     let current = await api.ingestJob(jobId);
     if (!current) return;
+    if (get().root !== workspaceRoot) return;
     set((state) => ({
       ingestJobs: state.ingestJobs.map((job) => (job.jobId === jobId ? current! : job)),
     }));
@@ -288,6 +293,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       await new Promise((resolve) => setTimeout(resolve, 350));
       try {
         current = await api.ingestJob(jobId);
+        if (get().root !== workspaceRoot) return;
       } catch (error) {
         set({ error: error instanceof Error ? error.message : String(error) });
         return;
@@ -304,6 +310,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
 
     try {
+      if (get().root !== workspaceRoot) return;
       await get().refresh();
       await get().loadIngestRuns();
       await get().loadDocuments();
@@ -363,6 +370,22 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
       set({ ingestLoading: false });
+    }
+  },
+
+  loadIngestJobs: async () => {
+    const { root } = get();
+    if (!root) return;
+    try {
+      const ingestJobs = await api.listIngestJobs(root);
+      set({ ingestJobs });
+      for (const job of ingestJobs) {
+        if (['queued', 'running'].includes(job.status)) {
+          void get().watchIngestJob(job.jobId);
+        }
+      }
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
     }
   },
 
@@ -461,6 +484,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           apiKey: '',
           gitAuthorName: settings.gitAuthorName ?? '',
           gitAuthorEmail: settings.gitAuthorEmail ?? '',
+          maxDraftTokens: settings.maxDraftTokens?.toString() ?? '',
         },
       });
     } catch (error) {
@@ -474,8 +498,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const { settingsForm } = get();
     set({ loading: true, error: undefined });
     try {
-      const settings = await api.saveSettings(settingsForm);
-      set({ settings, settingsForm: { ...settingsForm, apiKey: '' } });
+      const maxDraftTokens = settingsForm.maxDraftTokens.trim()
+        ? Number(settingsForm.maxDraftTokens)
+        : null;
+      const settings = await api.saveSettings({ ...settingsForm, maxDraftTokens });
+      set({
+        settings,
+        settingsForm: {
+          ...settingsForm,
+          apiKey: '',
+          maxDraftTokens: settings.maxDraftTokens?.toString() ?? '',
+        },
+      });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {

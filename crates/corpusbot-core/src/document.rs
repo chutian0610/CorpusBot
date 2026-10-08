@@ -70,11 +70,16 @@ struct RawFrontmatter {
     title: String,
     created: crate::date::IsoDate,
     updated: crate::date::IsoDate,
+    #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
     aliases: Vec<String>,
+    #[serde(default)]
     related: Vec<crate::link::Wikilink>,
+    #[serde(default)]
     sources: Vec<crate::source::SourceRef>,
+    #[serde(default)]
+    raw: Option<crate::source::RawReference>,
 }
 
 fn split_frontmatter(markdown: &str) -> Result<(Frontmatter, String)> {
@@ -115,6 +120,7 @@ fn split_frontmatter(markdown: &str) -> Result<(Frontmatter, String)> {
         raw.related,
         raw.sources,
     )?;
+    let frontmatter = frontmatter.with_raw(raw.raw)?;
     let body = markdown
         .lines()
         .skip(body_start)

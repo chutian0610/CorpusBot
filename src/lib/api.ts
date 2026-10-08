@@ -80,6 +80,7 @@ export const api = {
   startIngestContent: (root: string, fileName: string, markdown: string) =>
     invokeCommand<IngestJob>('start_ingest_content', { root, fileName, markdown }),
   ingestJob: (jobId: string) => invokeCommand<IngestJob | null>('get_ingest_job', { jobId }),
+  listIngestJobs: (root: string) => invokeCommand<IngestJob[]>('list_ingest_jobs', { root }),
   documents: (root: string) => invokeCommand<DocumentSummary[]>('list_documents', { root }),
   ingestRuns: (root: string, limit = 50) =>
     invokeCommand<IngestRunRow[]>('list_ingest_runs', { root, limit }),

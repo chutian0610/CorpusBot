@@ -12,9 +12,7 @@ use crate::error::{LintError, Result};
 use crate::is_reserved_page;
 use crate::report::{LintIssue, LintReport, LintSummary, Severity};
 
-const REQUIRED_FIELDS: [&str; 7] = [
-    "type", "title", "created", "updated", "tags", "related", "sources",
-];
+const REQUIRED_FIELDS: [&str; 4] = ["type", "title", "created", "updated"];
 
 #[derive(Clone, Debug)]
 struct RawPage {
@@ -171,6 +169,10 @@ fn run_lint_pages_with_comparison_log(
     let mut inbound = HashSet::new();
     for page in &parsed {
         for link in &page.links {
+            // Raw captures use immutable filesystem paths, not wiki identity.
+            if link.target().starts_with("raw/") {
+                continue;
+            }
             let Some(target) = resolve_link(link, &resolution) else {
                 issues.push(LintIssue {
                     code: "DEAD_LINK".to_owned(),
@@ -482,7 +484,9 @@ fn index_drift(pages: &[ParsedPage]) -> Vec<LintIssue> {
         code: "INDEX_DRIFT".to_owned(),
         severity: Severity::Warning,
         path: "wiki/index.md".to_owned(),
-        message: "index order or page set does not match canonical order".to_owned(),
+        message: format!(
+            "index order or page set does not match canonical order; expected {expected:?}, actual {actual:?}"
+        ),
         fix_hint: "Regenerate the index during ingest".to_owned(),
     }]
 }
@@ -577,6 +581,52 @@ sources: []
         ];
         let report = run_lint_pages(&pages, Template::Research, "manifest")?;
         assert_eq!(report.summary.pages, 2);
+        assert_eq!(report.summary.errors, 0);
+        assert_eq!(report.summary.warnings, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn allows_optional_collections_to_be_omitted() -> Result<()> {
+        let source = RawPage {
+            path: "wiki/sources/RaftSource.md".to_owned(),
+            markdown: r#"---
+type: source
+title: Raft Source
+created: 2026-09-08
+updated: 2026-09-08
+---
+
+Raft source notes.
+"#
+            .to_owned(),
+        };
+        let pages = vec![source, index_page(&["wiki/sources/RaftSource.md"])];
+        let report = run_lint_pages(&pages, Template::Research, "manifest")?;
+
+        assert_eq!(report.summary.errors, 0);
+        assert_eq!(report.summary.warnings, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn treats_raw_wikilinks_as_captured_resources() -> Result<()> {
+        let source = RawPage {
+            path: "wiki/sources/RaftSource.md".to_owned(),
+            markdown: r#"---
+type: source
+title: Raft Source
+created: 2026-09-08
+updated: 2026-09-08
+---
+
+Original file: [[raw/hash/raft.md|raft.md]]
+"#
+            .to_owned(),
+        };
+        let pages = vec![source, index_page(&["wiki/sources/RaftSource.md"])];
+        let report = run_lint_pages(&pages, Template::Research, "manifest")?;
+
         assert_eq!(report.summary.errors, 0);
         assert_eq!(report.summary.warnings, 0);
         Ok(())

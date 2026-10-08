@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CircleCheck, CircleAlert, Clock3, FileCode2, RefreshCw } from 'lucide-react';
-import { MarkdownPreview } from './MarkdownPreview';
+import {
+  ArrowUpRight,
+  CircleCheck,
+  CircleAlert,
+  Clock3,
+  FileCode2,
+  RefreshCw,
+  TriangleAlert,
+} from 'lucide-react';
+import { IngestJobProgress, IngestJobStepList } from './IngestJobProgress';
 import { useWorkspaceStore } from '../store/useWorkspaceStore';
 import type { IngestRunRow } from '../types';
 
@@ -32,6 +40,10 @@ function runSummary(run: IngestRunRow) {
     created: wikiResources.filter((resource) => resource.revisionKind === 'absent').length,
     updated: wikiResources.filter((resource) => resource.revisionKind !== 'absent').length,
   };
+}
+
+function outputLimitReached(event: { finishReason?: string | null; truncated?: boolean | null }) {
+  return event.finishReason === 'length' || event.truncated === true;
 }
 
 function ImportButton({ disabled = false }: { disabled?: boolean }) {
@@ -71,6 +83,7 @@ export function IngestView() {
   const loadIngestRuns = useWorkspaceStore((state) => state.loadIngestRuns);
   const selectIngestRun = useWorkspaceStore((state) => state.selectIngestRun);
   const selectPage = useWorkspaceStore((state) => state.selectPage);
+  const loadRawSource = useWorkspaceStore((state) => state.loadRawSource);
   const setActiveView = useWorkspaceStore((state) => state.setActiveView);
   const [query, setQuery] = useState('');
 
@@ -89,6 +102,33 @@ export function IngestView() {
   }, [query, runs]);
   const activeJobs = jobs.filter((job) => ['queued', 'running'].includes(job.status));
   const importing = activeJobs.length > 0;
+  const failedJobs = jobs.filter(
+    (job) => job.status === 'failed' && !runs.some((run) => run.runId === job.runId),
+  );
+  const affectedResources = useMemo(() => {
+    if (!detail) return [];
+    const resources = [...detail.touchedResources];
+    if (detail.sourcePage && !resources.some((item) => item.path === detail.sourcePage)) {
+      const rawIndex = resources.findIndex((item) => item.path.startsWith('raw/'));
+      resources.splice(rawIndex + 1, 0, {
+        path: detail.sourcePage,
+        revisionKind: 'absent',
+      });
+    }
+    return resources;
+  }, [detail]);
+
+  const activeJob = activeJobs[0];
+
+  const openResource = (path: string, sourceVersionId?: string | null) => {
+    setActiveView('documents');
+    if (path.startsWith('raw/')) {
+      if (!sourceVersionId) return;
+      void loadRawSource(sourceVersionId, path);
+      return;
+    }
+    void selectPage(path);
+  };
 
   return (
     <div className="grid min-h-0 flex-1 lg:grid-cols-[24rem_minmax(0,1fr)]">
@@ -124,12 +164,45 @@ export function IngestView() {
                       {job.status}
                     </span>
                   </div>
+                  <div className="mt-3">
+                    <IngestJobProgress job={job} />
+                  </div>
                   <p className="mt-1 text-xs text-stone-500">
                     Ingest is running in the background. You can keep using the app.
                   </p>
                 </li>
               ))}
             </ul>
+          ) : null}
+          {failedJobs.length > 0 ? (
+            <div className="border-b border-stone-200 bg-white">
+              <h3 className="px-4 pt-3 text-xs font-semibold uppercase tracking-wide text-red-600">
+                Failed imports
+              </h3>
+              <ul className="pb-2">
+                {failedJobs.map((job) => (
+                  <li key={job.jobId} className="px-4 py-3 text-sm">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="min-w-0 truncate font-medium" title={job.fileName}>
+                        {job.fileName}
+                      </span>
+                      <span className="shrink-0 rounded bg-red-50 px-1.5 py-0.5 text-[11px] font-medium capitalize text-red-600">
+                        Failed
+                      </span>
+                    </div>
+                    <p
+                      className="mt-1 line-clamp-3 text-xs text-red-600"
+                      title={job.error ?? 'Import failed'}
+                    >
+                      {job.error ?? 'Import failed'}
+                    </p>
+                    <p className="mt-1 text-xs text-stone-500">
+                      {formatTimestamp(new Date(job.createdAtMs).toISOString())}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ) : null}
           {listLoading && runs.length === 0 ? (
             <p className="p-4 text-sm text-stone-500">Loading ingest history</p>
@@ -183,29 +256,46 @@ export function IngestView() {
 
       <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] bg-paper">
         <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-stone-200 bg-white px-4">
-          <span className="min-w-0 truncate font-mono text-xs text-stone-500" title={selectedId}>
-            {selectedId ?? 'No ingest selected'}
+          <span
+            className="min-w-0 truncate font-mono text-xs text-stone-500"
+            title={activeJob?.fileName ?? selectedId}
+          >
+            {activeJob ? activeJob.fileName : (selectedId ?? 'No ingest selected')}
           </span>
-          {detail?.sourcePage ? (
-            <button
-              type="button"
-              className="shrink-0 rounded-md border border-stone-300 px-2 py-1 text-xs hover:bg-stone-100"
-              onClick={() => {
-                setActiveView('wiki');
-                void selectPage(detail.sourcePage as string);
-              }}
-            >
-              Open source page
-            </button>
-          ) : null}
         </div>
 
         <div className="min-h-0 overflow-auto p-6">
+          {activeJobs.length > 0 ? (
+            <section
+              aria-labelledby="running-ingest-heading"
+              className="mx-auto max-w-5xl rounded-md border border-stone-200 bg-white p-4"
+            >
+              <h3 id="running-ingest-heading" className="text-base font-semibold">
+                Running import
+              </h3>
+              <ul className="mt-3 space-y-4">
+                {activeJobs.map((job) => (
+                  <li key={job.jobId}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate text-sm font-medium" title={job.fileName}>
+                        {job.fileName}
+                      </span>
+                      <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium capitalize text-amber-700">
+                        {job.status}
+                      </span>
+                    </div>
+                    <IngestJobStepList job={job} />
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
           {detailLoading ? (
             <p className="text-sm text-stone-500">Loading ingest details</p>
-          ) : !detail ? (
+          ) : !detail && activeJobs.length === 0 ? (
             <p className="text-sm text-stone-500">Select an import to inspect its details.</p>
-          ) : (
+          ) : detail ? (
             <div className="mx-auto max-w-5xl space-y-6">
               <div className="flex flex-wrap items-center gap-2">
                 <span
@@ -223,59 +313,49 @@ export function IngestView() {
                 ) : null}
               </div>
 
+              {detail.events.some(outputLimitReached) ? (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"
+                >
+                  <TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-600" />
+                  <span>
+                    Output token limit reached. Increase Draft output token limit in Settings or
+                    narrow the selected pages, then retry.
+                  </span>
+                </div>
+              ) : null}
+
               <section aria-labelledby="ingest-files-heading" className="space-y-2">
                 <h3 id="ingest-files-heading" className="text-base font-semibold">
                   Affected resources
                 </h3>
                 <ul className="overflow-hidden rounded-md border border-stone-200 bg-white">
-                  {detail.touchedResources.map((resource) => (
-                    <li
-                      key={resource.path}
-                      className="flex items-center justify-between gap-3 border-b border-stone-100 px-3 py-2 text-sm last:border-b-0"
-                    >
-                      <span className="min-w-0 truncate font-mono" title={resource.path}>
-                        {resource.path}
-                      </span>
-                      <span
-                        className={`shrink-0 rounded px-1.5 py-0.5 text-xs ${
-                          resource.revisionKind === 'absent'
-                            ? 'bg-moss/10 text-moss'
-                            : 'bg-stone-100 text-stone-600'
-                        }`}
+                  {affectedResources.map((resource) => (
+                    <li key={resource.path} className="border-b border-stone-100 last:border-b-0">
+                      <button
+                        type="button"
+                        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors hover:bg-stone-50"
+                        onClick={() => openResource(resource.path, detail.sourceVersionId)}
                       >
-                        {resource.revisionKind === 'absent' ? 'New' : 'Updated'}
-                      </span>
+                        <span className="min-w-0 flex-1 truncate font-mono" title={resource.path}>
+                          {resource.path}
+                        </span>
+                        <span
+                          className={`shrink-0 rounded px-1.5 py-0.5 text-xs ${
+                            resource.revisionKind === 'absent'
+                              ? 'bg-moss/10 text-moss'
+                              : 'bg-stone-100 text-stone-600'
+                          }`}
+                        >
+                          {resource.revisionKind === 'absent' ? 'New' : 'Updated'}
+                        </span>
+                        <ArrowUpRight className="size-3.5 shrink-0 text-stone-400" />
+                      </button>
                     </li>
                   ))}
                 </ul>
               </section>
-
-              {detail.originalMarkdown ? (
-                <section aria-labelledby="original-source-heading" className="space-y-2">
-                  <h3 id="original-source-heading" className="text-base font-semibold">
-                    Original source
-                  </h3>
-                  <div className="rounded-md border border-stone-200 bg-white p-4">
-                    <MarkdownPreview markdown={detail.originalMarkdown} />
-                    {detail.originalMarkdownTruncated ? (
-                      <p className="mt-3 text-xs text-stone-500">
-                        Preview truncated to 48,000 characters.
-                      </p>
-                    ) : null}
-                  </div>
-                </section>
-              ) : null}
-
-              {detail.sourcePageMarkdown ? (
-                <section aria-labelledby="generated-source-heading" className="space-y-2">
-                  <h3 id="generated-source-heading" className="text-base font-semibold">
-                    Generated source page
-                  </h3>
-                  <div className="rounded-md border border-stone-200 bg-white p-4">
-                    <MarkdownPreview markdown={detail.sourcePageMarkdown} />
-                  </div>
-                </section>
-              ) : null}
 
               <section aria-labelledby="ingest-events-heading" className="space-y-2">
                 <h3 id="ingest-events-heading" className="text-base font-semibold">
@@ -302,6 +382,11 @@ export function IngestView() {
                             <span>· attempt {event.attempt}</span>
                           </span>
                         </div>
+                        {outputLimitReached(event) ? (
+                          <p className="mt-2 text-xs font-medium text-amber-700">
+                            Output token limit reached
+                          </p>
+                        ) : null}
                         <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs text-stone-600 sm:grid-cols-2">
                           {event.model ? <div>Model: {event.model}</div> : null}
                           {event.latencyMs !== undefined && event.latencyMs !== null ? (
@@ -328,7 +413,7 @@ export function IngestView() {
                 )}
               </section>
             </div>
-          )}
+          ) : null}
         </div>
       </section>
     </div>

@@ -2,11 +2,12 @@ mod commands;
 mod error;
 mod health;
 pub mod local_server;
+pub mod logging;
 
 use commands::{
     IngestJobStore, create_snapshot, get_ingest_job, get_settings, init_workspace, list_documents,
-    list_ingest_runs, list_snapshots, list_wiki_pages, open_workspace, query, read_ingest_run,
-    read_raw_source, read_wiki_page, restore_snapshot, run_lint, save_settings,
+    list_ingest_jobs, list_ingest_runs, list_snapshots, list_wiki_pages, open_workspace, query,
+    read_ingest_run, read_raw_source, read_wiki_page, restore_snapshot, run_lint, save_settings,
     start_ingest_content, test_llm_connection, workspace_status,
 };
 use health::health_payload;
@@ -17,6 +18,7 @@ fn health() -> serde_json::Value {
 }
 
 pub fn run() {
+    let _log_guard = logging::init();
     if let Err(error) = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(IngestJobStore::default())
@@ -31,6 +33,7 @@ pub fn run() {
             read_raw_source,
             start_ingest_content,
             get_ingest_job,
+            list_ingest_jobs,
             list_ingest_runs,
             read_ingest_run,
             list_documents,

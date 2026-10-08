@@ -6,6 +6,7 @@ pub mod identity;
 pub mod link;
 pub mod page_type;
 pub mod path;
+pub mod raw_document;
 pub mod resource;
 pub mod source;
 pub mod template;
@@ -19,7 +20,9 @@ pub use link::Wikilink;
 pub use link::extract_wikilinks;
 pub use page_type::PageType;
 pub use path::WikiPath;
+pub use raw_document::{RawMarkdown, split_raw_markdown};
 pub use resource::{ManifestId, ResourceId, ResourceRevision, Revision, RevisionManifest};
+pub use source::RawReference;
 pub use source::{SourceRecord, SourceRef};
 pub use template::Template;
 
