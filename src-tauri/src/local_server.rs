@@ -11,9 +11,9 @@ use corpusbot_agent::{LlmClient, LlmRequest, LlmResponse};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::commands::{
-    IngestJobStore, query_with_client, start_ingest_job, test_connection_with_client,
-};
+use crate::commands::{query_with_client, test_connection_with_client};
+use crate::documents::list_documents;
+use crate::ingest_jobs::{IngestJobStore, list_visible_ingest_jobs, start_ingest_job};
 
 const E2E_ANALYSIS: &str = r#"{
   "title": "E2E import",
@@ -225,24 +225,16 @@ async fn invoke(
         }
         "get_ingest_job" => {
             let job_id: String = argument(&args, "jobId")?;
-            let job = state
-                .ingest_jobs
-                .jobs
-                .lock()
-                .ok()
-                .and_then(|jobs| jobs.get(&job_id).cloned());
+            let job = state.ingest_jobs.get(&job_id);
             json_response(job)
         }
         "list_ingest_jobs" => {
             let root: PathBuf = argument(&args, "root")?;
-            json_response(crate::commands::list_visible_ingest_jobs(
-                &state.ingest_jobs,
-                &root,
-            ))
+            json_response(list_visible_ingest_jobs(&state.ingest_jobs, &root))
         }
         "list_documents" => {
             let root: PathBuf = argument(&args, "root")?;
-            json_response(crate::commands::list_documents(root)?)
+            json_response(list_documents(root)?)
         }
         "list_ingest_runs" => {
             let root: PathBuf = argument(&args, "root")?;

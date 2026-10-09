@@ -1,10 +1,8 @@
 #![allow(clippy::needless_pass_by_value)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 use time::OffsetDateTime;
 
 use corpusbot_agent::{
@@ -13,15 +11,14 @@ use corpusbot_agent::{
     provider_config_for_settings,
 };
 use corpusbot_core::{Revision, Template, WikiDoc, Wikilink, split_raw_markdown};
-use corpusbot_ingest::Ingestor;
 use corpusbot_search::SearchIndex;
 use corpusbot_store::GitIdentity;
 use corpusbot_store::Workspace;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
-use uuid::Uuid;
+use tauri::{AppHandle, State};
 
 use crate::error::CommandError;
+use crate::ingest_jobs::{IngestJob, IngestJobStore, list_visible_ingest_jobs, start_ingest_job};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,49 +96,6 @@ pub struct IngestRunDetail {
     pub events: Vec<IngestAuditEvent>,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IngestJob {
-    pub job_id: String,
-    pub root: String,
-    pub file_name: String,
-    pub status: String,
-    pub stage: Option<String>,
-    pub run_id: Option<String>,
-    pub created_at_ms: u64,
-    pub updated_at_ms: u64,
-    pub result: Option<corpusbot_ingest::IngestResult>,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Default)]
-pub struct IngestJobStore {
-    pub(crate) jobs: Arc<Mutex<HashMap<String, IngestJob>>>,
-    pub(crate) ingest_lock: Arc<Mutex<()>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DocumentPage {
-    pub path: String,
-    pub title: String,
-    pub page_type: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DocumentSummary {
-    pub source_page: String,
-    pub source_version_id: String,
-    pub raw_path: Option<String>,
-    pub original_name: Option<String>,
-    pub size: Option<u64>,
-    pub title: String,
-    pub updated_at: String,
-    pub pages: Vec<DocumentPage>,
-}
-
 fn template_from_name(value: &str) -> Result<Template, CommandError> {
     Template::ALL
         .into_iter()
@@ -149,7 +103,7 @@ fn template_from_name(value: &str) -> Result<Template, CommandError> {
         .ok_or_else(|| CommandError(format!("unknown template: {value}")))
 }
 
-fn workspace(root: &Path) -> Result<Workspace, CommandError> {
+pub(crate) fn workspace(root: &Path) -> Result<Workspace, CommandError> {
     let identity = git_identity().map_err(|error| CommandError(error.to_string()))?;
     let identity = identity.map(|(name, email)| GitIdentity { name, email });
     Workspace::open_with_identity(root, Template::default_template(), identity)
@@ -515,183 +469,6 @@ pub fn read_raw_source(
     }))
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        })
-}
-
-pub(crate) fn update_ingest_job(
-    store: &IngestJobStore,
-    mut job: IngestJob,
-    app: Option<&AppHandle>,
-) {
-    job.updated_at_ms = now_ms();
-    if let Ok(mut jobs) = store.jobs.lock() {
-        jobs.insert(job.job_id.clone(), job.clone());
-    }
-    if let Some(app) = app {
-        let _ = app.emit("ingest-job-updated", &job);
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-pub(crate) async fn start_ingest_job(
-    app: Option<AppHandle>,
-    store: IngestJobStore,
-    root: PathBuf,
-    file_name: String,
-    markdown: String,
-    max_draft_tokens: u64,
-    llm_client: impl LlmClient + 'static,
-) -> Result<IngestJob, CommandError> {
-    let job_id = Uuid::new_v4().to_string();
-    let now = now_ms();
-    let job = IngestJob {
-        job_id: job_id.clone(),
-        root: root.to_string_lossy().to_string(),
-        file_name: file_name.clone(),
-        status: "queued".to_owned(),
-        stage: None,
-        run_id: None,
-        created_at_ms: now,
-        updated_at_ms: now,
-        result: None,
-        error: None,
-    };
-    update_ingest_job(&store, job.clone(), app.as_ref());
-    tracing::info!(
-        job_id = %job.job_id,
-        root = %root.display(),
-        file_name = %file_name,
-        "ingest job queued"
-    );
-
-    let ingest_lock = store.ingest_lock.clone();
-    let progress_store = store.clone();
-    let progress_job_id = job_id.clone();
-    let progress: corpusbot_ingest::IngestProgressCallback = Arc::new(move |update| {
-        if let Ok(mut jobs) = progress_store.jobs.lock()
-            && let Some(job) = jobs.get_mut(&progress_job_id)
-        {
-            job.stage = Some(update.stage.as_str().to_owned());
-            job.run_id = Some(update.run_id.clone());
-            job.updated_at_ms = now_ms();
-            tracing::debug!(
-                job_id = %progress_job_id,
-                stage = update.stage.as_str(),
-                run_id = %update.run_id,
-                "ingest progress"
-            );
-        }
-    });
-    let queued_job = job.clone();
-    let response_job = job.clone();
-    tokio::task::spawn_blocking(move || {
-        update_ingest_job(
-            &store,
-            IngestJob {
-                status: "running".to_owned(),
-                stage: Some("prepare".to_owned()),
-                ..queued_job
-            },
-            None,
-        );
-
-        let _guard = ingest_lock.lock();
-        let outcome = (|| -> Result<corpusbot_ingest::IngestResult, String> {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| error.to_string())?;
-            let workspace = workspace(&root).map_err(|error| error.to_string())?;
-            runtime
-                .block_on(async {
-                    Ingestor::new(llm_client)
-                        .with_max_draft_tokens(max_draft_tokens)
-                        .with_progress(progress.clone())
-                        .ingest_content(&workspace, &file_name, &markdown)
-                        .await
-                })
-                .map_err(|error| error.to_string())
-        })();
-
-        let (stage, run_id) = store
-            .jobs
-            .lock()
-            .ok()
-            .and_then(|jobs| {
-                jobs.get(&job_id)
-                    .map(|job| (job.stage.clone(), job.run_id.clone()))
-            })
-            .unwrap_or_else(|| (job.stage.clone(), job.run_id.clone()));
-        let finished = match outcome {
-            Ok(result) => IngestJob {
-                status: "succeeded".to_owned(),
-                result: Some(result),
-                error: None,
-                stage,
-                run_id,
-                ..job.clone()
-            },
-            Err(error) => IngestJob {
-                status: "failed".to_owned(),
-                error: Some(error),
-                result: None,
-                stage,
-                run_id,
-                ..job.clone()
-            },
-        };
-        update_ingest_job(&store, finished, app.as_ref());
-        let final_status = store
-            .jobs
-            .lock()
-            .ok()
-            .and_then(|jobs| {
-                jobs.get(&job_id)
-                    .map(|job| (job.status.clone(), job.error.clone()))
-            })
-            .unwrap_or_default();
-        if final_status.0 == "failed" {
-            tracing::error!(
-                job_id = %job_id,
-                error = final_status.1.as_deref().unwrap_or_default(),
-                "ingest job failed"
-            );
-        } else {
-            tracing::info!(
-                job_id = %job_id,
-                status = %final_status.0,
-                "ingest job finished"
-            );
-        }
-    });
-
-    Ok(response_job)
-}
-
-pub(crate) fn list_visible_ingest_jobs(store: &IngestJobStore, root: &Path) -> Vec<IngestJob> {
-    let root = root.to_string_lossy();
-    let mut jobs = store
-        .jobs
-        .lock()
-        .map(|jobs| {
-            jobs.values()
-                .filter(|job| {
-                    job.root == root
-                        && ["queued", "running", "failed"].contains(&job.status.as_str())
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    jobs.sort_by_key(|job| job.created_at_ms);
-    jobs
-}
-
 #[tauri::command]
 pub async fn start_ingest_content(
     app: AppHandle,
@@ -720,117 +497,12 @@ pub async fn get_ingest_job(
     state: State<'_, IngestJobStore>,
     job_id: String,
 ) -> Result<Option<IngestJob>, CommandError> {
-    Ok(state
-        .jobs
-        .lock()
-        .ok()
-        .and_then(|jobs| jobs.get(&job_id).cloned()))
+    Ok(state.get(&job_id))
 }
 
 #[tauri::command]
 pub fn list_ingest_jobs(state: State<'_, IngestJobStore>, root: PathBuf) -> Vec<IngestJob> {
     list_visible_ingest_jobs(state.inner(), &root)
-}
-
-#[tauri::command]
-pub fn list_documents(root: PathBuf) -> Result<Vec<DocumentSummary>, CommandError> {
-    let workspace = workspace(&root)?;
-    let mut documents: HashMap<String, DocumentSummary> = HashMap::new();
-    let mut extracted: HashMap<String, Vec<DocumentPage>> = HashMap::new();
-
-    for entry in walkdir::WalkDir::new(workspace.paths().wiki_dir.clone()).sort_by_file_name() {
-        let entry = entry.map_err(|error| CommandError(error.to_string()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(workspace.paths().root.as_path())
-            .map_err(|error| CommandError(error.to_string()))?
-            .to_string_lossy()
-            .replace('\\', "/");
-        if matches!(relative.as_str(), "wiki/index.md" | "wiki/log.md") {
-            continue;
-        }
-        let Ok(wiki_path) = corpusbot_core::WikiPath::parse(&relative) else {
-            continue;
-        };
-        let Ok(markdown) = std::fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        let Ok((document, _)) = WikiDoc::parse_markdown(wiki_path, &markdown) else {
-            continue;
-        };
-        let frontmatter = document.frontmatter();
-        let page_type = frontmatter.page_type().as_str().to_owned();
-
-        if page_type == "source" {
-            if let Some(source) = frontmatter.sources().first() {
-                documents.insert(
-                    source.source_version_id().to_owned(),
-                    DocumentSummary {
-                        source_page: relative,
-                        source_version_id: source.source_version_id().to_owned(),
-                        raw_path: None,
-                        original_name: None,
-                        size: None,
-                        title: frontmatter.title().to_owned(),
-                        updated_at: frontmatter.updated().to_string(),
-                        pages: Vec::new(),
-                    },
-                );
-            }
-            continue;
-        }
-
-        for source in frontmatter.sources() {
-            extracted
-                .entry(source.source_version_id().to_owned())
-                .or_default()
-                .push(DocumentPage {
-                    path: relative.clone(),
-                    title: frontmatter.title().to_owned(),
-                    page_type: page_type.clone(),
-                    updated_at: frontmatter.updated().to_string(),
-                });
-        }
-    }
-
-    let mut summaries: Vec<DocumentSummary> = documents
-        .into_values()
-        .map(|mut summary| {
-            let mut pages = extracted
-                .remove(&summary.source_version_id)
-                .unwrap_or_default();
-            pages.sort_by(|left, right| {
-                left.page_type
-                    .cmp(&right.page_type)
-                    .then(left.title.to_lowercase().cmp(&right.title.to_lowercase()))
-            });
-            summary.pages = pages;
-            summary
-        })
-        .collect();
-    summaries.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then(left.title.cmp(&right.title))
-    });
-    for summary in &mut summaries {
-        let source = workspace
-            .source_by_version_id(&summary.source_version_id)
-            .map_err(|error| CommandError(error.to_string()))?;
-        if let Some(source) = source {
-            let raw_path = format!("raw/{}/{}", source.sha256, source.original_name);
-            if workspace.paths().root.join(&raw_path).exists() {
-                summary.raw_path = Some(raw_path);
-                summary.original_name = Some(source.original_name);
-                summary.size = Some(source.size);
-            }
-        }
-    }
-    Ok(summaries)
 }
 
 #[tauri::command]
@@ -1053,37 +725,6 @@ mod tests {
     use corpusbot_lint::{LintIssue, LintReport, LintSummary, Severity};
     use corpusbot_store::{IngestRunRow, PageRow, SnapshotRow, TouchedResource, WorkspaceStatus};
     use serde_json::{Value, json};
-
-    #[test]
-    fn lists_only_active_jobs_for_selected_workspace() {
-        let store = IngestJobStore::default();
-        for (job_id, root, status) in [
-            ("running", "/tmp/one", "running"),
-            ("succeeded", "/tmp/one", "succeeded"),
-            ("other-root", "/tmp/two", "running"),
-        ] {
-            update_ingest_job(
-                &store,
-                IngestJob {
-                    job_id: job_id.to_owned(),
-                    root: root.to_owned(),
-                    file_name: format!("{job_id}.md"),
-                    status: status.to_owned(),
-                    stage: None,
-                    run_id: None,
-                    created_at_ms: 1,
-                    updated_at_ms: 1,
-                    result: None,
-                    error: None,
-                },
-                None,
-            );
-        }
-
-        let jobs = list_visible_ingest_jobs(&store, Path::new("/tmp/one"));
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].job_id, "running");
-    }
 
     #[test]
     fn page_commands_use_camel_case() -> Result<(), serde_json::Error> {
