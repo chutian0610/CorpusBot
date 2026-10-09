@@ -1,10 +1,14 @@
 # CorpusBot
 
-CorpusBot is a local-first knowledge-base engine that compiles Markdown sources into a maintained Wiki and answers questions with verifiable citations.
+CorpusBot is a local-first knowledge-base engine that compiles Markdown sources
+into a maintained Wiki and answers questions with verifiable citations.
 
-The MVP implementation plan is in [docs/MVP_PLAN.md](docs/MVP_PLAN.md), acceptance evidence in
+The implementation boundaries and runtime surfaces are summarized in
+[docs/architecture.md](docs/architecture.md). The MVP implementation plan is in
+[docs/MVP_PLAN.md](docs/MVP_PLAN.md), acceptance evidence in
 [docs/MVP_ACCEPTANCE.md](docs/MVP_ACCEPTANCE.md), and the next scope in
-[docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md). Architecture decisions are in [docs/adr](docs/adr).
+[docs/ALPHA_PLAN.md](docs/ALPHA_PLAN.md). Architecture decisions are in
+[docs/adr](docs/adr).
 
 ## Requirements
 

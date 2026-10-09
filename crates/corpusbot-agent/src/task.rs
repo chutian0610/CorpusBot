@@ -5,7 +5,9 @@ use std::time::Instant;
 
 use crate::audit::{AuditSink, FileAuditSink};
 use crate::error::{AgentError, Result};
-use crate::llm::{LlmClient, LlmRequest, LlmResponse, StructuredOutput};
+use crate::llm::{LlmClient, LlmRequest};
+use crate::parsing::parse_json;
+use crate::prompts::{analyze_request, draft_request, query_request};
 use crate::workflow::{
     Transition, WorkflowContext, WorkflowKernel, WorkflowNode, WorkflowNodeHandler, WorkflowOutcome,
 };
@@ -209,10 +211,6 @@ enum BatchDraftPage {
     Entity(EntityDraft),
     Concept(ConceptDraft),
 }
-
-pub const ANALYZE_PROMPT_ID: &str = "analyze-source-v2";
-pub const DRAFT_PROMPT_ID: &str = "generate-drafts-v5";
-pub const QUERY_PROMPT_ID: &str = "answer-query-v1";
 
 pub struct SourceAgent<C> {
     client: Arc<C>,
@@ -510,7 +508,9 @@ impl<C: LlmClient + 'static> WorkflowNodeHandler<AnalysisState> for AnalyzeHandl
         )
         .await?;
         context.set_output_ref(response_ref);
-        context.set_decision(decision);
+        if parsed.is_some() {
+            context.set_decision(decision);
+        }
         match parsed {
             Some(analysis) => Ok(Transition::Next {
                 state: AnalysisState {
@@ -520,11 +520,7 @@ impl<C: LlmClient + 'static> WorkflowNodeHandler<AnalysisState> for AnalyzeHandl
             }),
             None => Ok(Transition::Retry {
                 state: context.state.clone(),
-                reason: if output_limit_reached(context) {
-                    "analysis output reached token limit".to_owned()
-                } else {
-                    "analysis output did not match schema".to_owned()
-                },
+                reason: format!("analysis {}", completion_failure_reason(context)),
             }),
         }
     }
@@ -616,11 +612,13 @@ impl<C: LlmClient + 'static> WorkflowNodeHandler<DraftState> for DraftHandler<C>
             )
             .await?;
             context.set_output_ref(response_ref.clone());
-            context.set_decision(format!(
-                "batch {}/{}: {decision}",
-                batch_index + 1,
-                self.batches.len()
-            ));
+            if parsed.is_some() {
+                context.set_decision(format!(
+                    "batch {}/{}: {decision}",
+                    batch_index + 1,
+                    self.batches.len()
+                ));
+            }
             match parsed {
                 Some(raw_plan) => match draft_plan_from_value(raw_plan) {
                     Ok(plan) => {
@@ -665,19 +663,12 @@ impl<C: LlmClient + 'static> WorkflowNodeHandler<DraftState> for DraftHandler<C>
                             plan: Some(merged),
                             completed_batches,
                         },
-                        reason: if output_limit_reached(context) {
-                            format!(
-                                "draft batch {}/{} reached token limit",
-                                batch_index + 1,
-                                self.batches.len()
-                            )
-                        } else {
-                            format!(
-                                "draft batch {}/{} did not match schema",
-                                batch_index + 1,
-                                self.batches.len()
-                            )
-                        },
+                        reason: format!(
+                            "draft batch {}/{} {}",
+                            batch_index + 1,
+                            self.batches.len(),
+                            completion_failure_reason(context)
+                        ),
                     });
                 }
             }
@@ -834,166 +825,6 @@ impl WorkflowNodeHandler<QueryState> for ValidateAnswerHandler {
     }
 }
 
-fn analyze_request(source_title: &str, markdown: &str, max_tokens: u64) -> LlmRequest {
-    LlmRequest {
-        operation: "analyze_source".to_owned(),
-        system: ANALYZE_SYSTEM.to_owned(),
-        prompt: format!("# Source title\n\n{source_title}\n\n# Source markdown\n\n{markdown}"),
-        prompt_template_id: ANALYZE_PROMPT_ID.to_owned(),
-        temperature: Some(0.1),
-        max_tokens: Some(max_tokens),
-        structured_output: None,
-    }
-}
-
-fn draft_response_format() -> StructuredOutput {
-    let string_array = serde_json::json!({
-        "type": "array",
-        "items": {"type": "string"}
-    });
-    let evidence = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["quote", "section"],
-        "properties": {
-            "quote": {"type": "string"},
-            "section": {"type": "string"}
-        }
-    });
-    let section = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["heading", "paragraphs", "bullets"],
-        "properties": {
-            "heading": {"type": "string"},
-            "paragraphs": {"type": "array", "items": {"type": "string"}},
-            "bullets": {"type": "array", "items": {"type": "string"}}
-        }
-    });
-    let page_fields = serde_json::json!({
-        "aliases": string_array,
-        "tags": string_array,
-        "related": string_array,
-        "sections": {"type": "array", "items": section},
-        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "importance": {
-            "type": "string",
-            "enum": ["core", "supporting", "incidental"]
-        },
-        "evidence": {"type": "array", "items": evidence}
-    });
-    let mut entity = page_fields.clone();
-    let entity_object = entity.as_object_mut().expect("entity fields are an object");
-    entity_object.insert("page_type".to_owned(), serde_json::json!("entity"));
-    entity_object.insert("name".to_owned(), serde_json::json!({"type": "string"}));
-    entity_object.insert("summary".to_owned(), serde_json::json!({"type": "string"}));
-    let mut concept = page_fields;
-    let concept_object = concept
-        .as_object_mut()
-        .expect("concept fields are an object");
-    concept_object.insert("page_type".to_owned(), serde_json::json!("concept"));
-    concept_object.insert("name".to_owned(), serde_json::json!({"type": "string"}));
-    concept_object.insert(
-        "definition".to_owned(),
-        serde_json::json!({"type": "string"}),
-    );
-
-    StructuredOutput {
-        name: "corpusbot_draft_batch".to_owned(),
-        schema: serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["pages"],
-            "properties": {
-                "pages": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 4,
-                    "items": {
-                        "anyOf": [
-                            {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": [
-                                    "page_type", "name", "aliases", "summary", "tags",
-                                    "related", "sections", "confidence", "importance", "evidence"
-                                ],
-                                "properties": entity
-                            },
-                            {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": [
-                                    "page_type", "name", "aliases", "definition", "tags",
-                                    "related", "sections", "confidence", "importance", "evidence"
-                                ],
-                                "properties": concept
-                            }
-                        ]
-                    }
-                }
-            }
-        }),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draft_request(
-    template_name: &str,
-    source_title: &str,
-    source_excerpts: &str,
-    candidate_json: &str,
-    batch_index: usize,
-    batch_count: usize,
-    related_pages: &[(String, String, String)],
-    max_tokens: u64,
-) -> Result<LlmRequest> {
-    let related = related_pages
-        .iter()
-        .map(|(path, title, excerpt)| format!("## {path}\n\nTitle: {title}\n\n{excerpt}"))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    Ok(LlmRequest {
-        operation: "generate_drafts".to_owned(),
-        system: DRAFT_SYSTEM.replace("{template}", template_name),
-        prompt: format!(
-            "# Source title\n\n{source_title}\n\n# Source excerpts\n\n{source_excerpts}\n\n# Candidates for this batch\n\n{candidate_json}\n\n# Existing related pages\n\n{related}\n\n# Batch\n\n{batch_index} of {batch_count}"
-        ),
-        prompt_template_id: DRAFT_PROMPT_ID.to_owned(),
-        temperature: Some(0.2),
-        max_tokens: Some(max_tokens),
-        structured_output: Some(draft_response_format()),
-    })
-}
-
-fn query_request(question: &str, context: &[QueryContextPage]) -> LlmRequest {
-    let evidence = context
-        .iter()
-        .enumerate()
-        .map(|(index, page)| {
-            format!(
-                "[{}] path: {}\ntitle: {}\npage_type: {}\nrevision: {}\ncontent:\n{}",
-                index + 1,
-                page.path,
-                page.title,
-                page.page_type,
-                page.revision.key(),
-                page.markdown
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    LlmRequest {
-        operation: "answer_query".to_owned(),
-        system: QUERY_SYSTEM.to_owned(),
-        prompt: format!("# Question\n\n{question}\n\n# Evidence\n\n{evidence}"),
-        prompt_template_id: QUERY_PROMPT_ID.to_owned(),
-        temperature: Some(0.1),
-        max_tokens: Some(3000),
-        structured_output: None,
-    }
-}
-
 async fn complete_audited<C: LlmClient, S, T>(
     client: &C,
     audit: &FileAuditSink,
@@ -1076,7 +907,13 @@ where
             }
         }
         Err(_error) => {
-            context.set_decision("provider call failed");
+            context.set_decision(format!("provider failed: {_error}"));
+            tracing::error!(
+                operation = %request.operation,
+                node = %node_name(node),
+                error = %_error,
+                "LLM provider call failed"
+            );
             Ok((request_ref, "provider failed", None))
         }
     }
@@ -1100,6 +937,19 @@ fn output_limit_reached<S>(context: &WorkflowContext<S>) -> bool {
     context
         .last_response()
         .is_some_and(|response| response.finish_reason.as_deref() == Some("length"))
+}
+
+fn completion_failure_reason<S>(context: &WorkflowContext<S>) -> String {
+    if output_limit_reached(context) {
+        return "output reached token limit".to_owned();
+    }
+    if context
+        .decision()
+        .is_some_and(|decision| decision.starts_with("provider failed:"))
+    {
+        return context.decision().unwrap_or_default().to_owned();
+    }
+    "output did not match schema".to_owned()
 }
 
 fn normalize_analysis(
@@ -1620,7 +1470,7 @@ fn is_legacy_concept_page(value: &serde_json::Value) -> bool {
         || (value.get("definition").is_some() && value.get("summary").is_none())
 }
 
-fn validate_draft_plan(plan: &DraftPlan, template: corpusbot_core::Template) -> Option<String> {
+pub fn validate_draft_plan(plan: &DraftPlan, template: corpusbot_core::Template) -> Option<String> {
     if plan.source_summary.chars().count() > 4000 {
         return Some("source summary is too long".to_owned());
     }
@@ -1683,46 +1533,6 @@ fn page_sections_acceptable(importance: Option<Importance>, sections: &[DraftSec
     )
 }
 
-fn parse_json<T: for<'de> Deserialize<'de>>(response: &LlmResponse) -> Result<T> {
-    let mut text = strip_reasoning(&response.text);
-    if text.starts_with("```") {
-        text = text.trim_start_matches("```json").trim_start_matches("```");
-        text = text.trim_end_matches("```").trim();
-    }
-    let start = text
-        .find('{')
-        .ok_or_else(|| AgentError::Schema("response does not contain a JSON object".to_owned()))?;
-    let end = text
-        .rfind('}')
-        .ok_or_else(|| AgentError::Schema("response JSON object is unterminated".to_owned()))?;
-    if start >= end {
-        return Err(AgentError::Schema("response JSON is malformed".to_owned()));
-    }
-    let json = &text[start..=end];
-    match serde_json::from_str::<T>(json) {
-        Ok(value) => Ok(value),
-        Err(original_error) => {
-            let repaired = repair_unescaped_quotes(json);
-            let repaired = repair_missing_section_values(repaired);
-            let repaired = repair_misnested_page_bullets(repaired);
-            serde_json::from_str::<T>(&repaired)
-                .map_err(|_| AgentError::Schema(format!("invalid JSON: {original_error}")))
-        }
-    }
-}
-
-fn repair_missing_section_values(json: String) -> String {
-    json.replace("{\"paragraph\"}", "{\"paragraphs\":[]}")
-        .replace("{\"bullets\"}", "{\"bullets\":[]}")
-}
-
-/// Repairs a provider mistake in batch drafts: `sections` is left open, then
-/// the page-level fields are emitted as a separate object. Reopening that
-/// object as a page-level `bullets` key restores the intended bracket shape.
-fn repair_misnested_page_bullets(json: String) -> String {
-    json.replace(r#"]},{"bullets":"#, r#"]}],"bullets":"#)
-}
-
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         value.to_owned()
@@ -1730,99 +1540,6 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         value.chars().take(max_chars).collect()
     }
 }
-
-/// Repairs the common provider mistake of leaving unescaped ASCII quotes
-/// inside string values (for example: `强调"证据"优先`). A quote is only
-/// treated as a JSON delimiter when a structural token follows it.
-fn repair_unescaped_quotes(json: &str) -> String {
-    let mut repaired = String::with_capacity(json.len() + 16);
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut chars = json.chars().peekable();
-
-    while let Some(character) = chars.next() {
-        if !in_string {
-            if character == '"' {
-                in_string = true;
-            }
-            repaired.push(character);
-            continue;
-        }
-
-        if escaped {
-            escaped = false;
-            repaired.push(character);
-            continue;
-        }
-
-        match character {
-            '\\' => {
-                escaped = true;
-                repaired.push(character);
-            }
-            '"' => {
-                let follows_structure = chars
-                    .peek()
-                    .is_none_or(|next| matches!(next, ',' | ':' | '}' | ']'))
-                    || chars
-                        .clone()
-                        .find(|character| !character.is_whitespace())
-                        .is_some_and(|next| matches!(next, ',' | ':' | '}' | ']'));
-                if follows_structure {
-                    in_string = false;
-                    repaired.push(character);
-                } else {
-                    repaired.push('\\');
-                    repaired.push(character);
-                }
-            }
-            character => repaired.push(character),
-        }
-    }
-
-    repaired
-}
-
-fn strip_reasoning(text: &str) -> &str {
-    let trimmed = text.trim();
-    let Some(start) = trimmed.find("<think>") else {
-        return trimmed;
-    };
-    let Some(end_offset) = trimmed[start..].find("</think>") else {
-        return trimmed;
-    };
-    let end = start + end_offset + "</think>".len();
-    trimmed[end..].trim()
-}
-
-const ANALYZE_SYSTEM: &str = r#"You are a precise research analyst. Return only a JSON object, without Markdown fences.
-Required shape:
-{"title":"string","summary":"string","entities":[{"name":"string","aliases":["string"],"summary":"string","confidence":0.0,"importance":"core|supporting|incidental","evidence":[{"quote":"exact source text","section":"heading"}]}],"concepts":[{"name":"string","aliases":["string"],"definition":"string","confidence":0.0,"importance":"core|supporting|incidental","evidence":[{"quote":"exact source text","section":"heading"}]}]}
-Inventory every salient entity and reusable concept. Do not impose an arbitrary page count. Include central, supporting, and incidental candidates when they are explicitly present. Every entity and concept MUST include `aliases`; use `[]` when there are none. Confidence is 0.0-1.0. Evidence quotes must be copied exactly from the source. Use concise evidence-backed wording. Do not invent facts. All JSON string values must be valid JSON. Escape any ASCII double quote inside text as \" or, preferably, use 「」 for quoted terms."#;
-
-const DRAFT_SYSTEM: &str = r#"You are a wiki editor. Return exactly one valid JSON object. Do not emit reasoning, <think>, Markdown fences, or text before or after JSON.
-Generate only the candidate pages listed in this batch. Do not add or omit pages.
-
-Use exactly this JSON grammar:
-root ::= {"pages": [page]}
-page ::= entity_page | concept_page
-entity_page ::= {"page_type":"entity","name":"string","aliases":[string],"summary":"string","tags":[string],"related":[string],"sections":[section],"confidence":number,"importance":"core"|"supporting"|"incidental","evidence":[evidence]}
-concept_page ::= {"page_type":"concept","name":"string","aliases":[string],"definition":"string","tags":[string],"related":[string],"sections":[section],"confidence":number,"importance":"core"|"supporting"|"incidental","evidence":[evidence]}
-section ::= {"heading":"string","paragraphs":[string],"bullets":[string]}
-evidence ::= {"quote":"exact source text","section":"string"}
-
-Allowed entity-page keys are exactly: page_type, name, aliases, summary, tags, related, sections, confidence, importance, evidence.
-Allowed concept-page keys are exactly: page_type, name, aliases, definition, tags, related, sections, confidence, importance, evidence.
-Allowed section keys are exactly: heading, paragraphs, bullets.
-`bullets` is allowed only inside a section. A page must not have a page-level `bullets` key. Do not close a page object until every page-level field has been written.
-The pages array must contain exactly one object per candidate in this batch.
-
-Core pages need two or three substantive sections. Supporting pages need one or two. Incidental pages may be a concise stub. Keep sections to at most two paragraphs and three bullets. Use only facts stated in the source or candidate metadata. Tags are lowercase kebab-case. Use exact names from Candidate metadata or Existing related pages for related; omit related when uncertain. Do not invent facts. Every returned entity and concept MUST include `aliases`; use `[]` when there are none. All JSON string values must be valid JSON. Escape any ASCII double quote inside text as \" or, preferably, use 「」 for quoted terms."#;
-const QUERY_SYSTEM: &str = r#"You are a wiki research assistant. Answer only from numbered evidence.
-Return exactly one JSON object and no other content. Do not emit reasoning, <think>, Markdown fences, or text before or after JSON.
-{"answer":"string with [number] citations","citations":[{"number":1,"path":"wiki/page.md","quote":"exact evidence quote","revision":{"kind":"content","value":{"sha256":"..."}}}]}
-Quotes must be copied exactly from evidence. If evidence is insufficient, use an empty citations array.
-Use unescaped double quotes only as JSON string delimiters. Inside any JSON string, escape double quotes as \" or, preferably, use 「」 for quoted terms."#;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryContextPage {
@@ -1875,7 +1592,9 @@ fn normalize_whitespace(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::FakeLlmClient;
+    use crate::llm::{FakeLlmClient, LlmResponse};
+    use crate::parsing::repair_missing_section_values;
+    use crate::prompts::{ANALYZE_PROMPT_ID, draft_response_format};
 
     struct LengthLimitedClient;
 
@@ -1921,6 +1640,35 @@ mod tests {
         assert!(events.contains(r#""finish_reason":"length""#));
         assert!(events.contains(r#""truncated":true"#));
         assert!(events.contains("analysis output reached token limit"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_failures_are_retained_in_retry_reasons() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let client = FakeLlmClient::new(Vec::<String>::new());
+        let agent = SourceAgent::new(client);
+        let error = agent
+            .analyze_source_audited(
+                root.path(),
+                "provider-failure",
+                "manifest",
+                "Raft",
+                "# Raft",
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AgentError::AttemptsExhausted { attempts: 2, .. }
+        ));
+        let ledger = std::fs::read_to_string(
+            root.path()
+                .join(".wiki-db/audit/provider-failure/events.jsonl"),
+        )?;
+        assert!(ledger.contains("provider failed: provider returned an empty response"));
+        assert!(ledger.contains("analysis provider failed"));
         Ok(())
     }
 

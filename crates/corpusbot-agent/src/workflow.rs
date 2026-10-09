@@ -119,6 +119,10 @@ impl<S> WorkflowContext<S> {
         self.decision = Some(decision.into());
     }
 
+    pub fn decision(&self) -> Option<&str> {
+        self.decision.as_deref()
+    }
+
     pub fn record_llm_response(
         &mut self,
         response: &LlmResponse,
@@ -225,7 +229,6 @@ where
             };
 
             let attempt = context.attempt(node) + 1;
-            let status_key = format!("{node:?}");
             context.attempts.insert(node, attempt);
             context.last_llm_call = None;
             context.output_ref = None;
@@ -238,7 +241,12 @@ where
                 Ok(transition) => transition,
                 Err(error) => {
                     context
-                        .audit(node, attempt, AttemptStatus::Failed, Some(status_key))
+                        .audit(
+                            node,
+                            attempt,
+                            AttemptStatus::Failed,
+                            Some(error.to_string()),
+                        )
                         .await?;
                     return Err(error);
                 }
@@ -412,6 +420,38 @@ mod tests {
             AgentError::AttemptsExhausted { attempts: 2, .. }
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 2);
+        Ok(())
+    }
+
+    struct FailingHandler;
+
+    #[async_trait]
+    impl WorkflowNodeHandler<Vec<String>> for FailingHandler {
+        async fn run(
+            &self,
+            _context: &mut WorkflowContext<Vec<String>>,
+        ) -> Result<Transition<Vec<String>>> {
+            Err(AgentError::Schema("boom".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn failures_persist_a_diagnostic_error_code() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let kernel: WorkflowKernel<Vec<String>> = WorkflowKernel::new(WorkflowNode::Analyze)
+            .handler(WorkflowNode::Analyze, Arc::new(FailingHandler));
+        let context = WorkflowContext::new(
+            Vec::new(),
+            "run-failure",
+            None,
+            Arc::new(FileAuditSink::new(root.path())),
+        );
+
+        assert!(kernel.run(context).await.is_err());
+        let ledger =
+            std::fs::read_to_string(root.path().join(".wiki-db/audit/run-failure/events.jsonl"))?;
+        assert!(ledger.contains(r#""status":"failed""#));
+        assert!(ledger.contains("provider output did not match the schema: boom"));
         Ok(())
     }
 }

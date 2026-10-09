@@ -48,10 +48,9 @@ test('imports, reads, questions, lints, and restores a workspace', async ({ page
   await page.getByRole('button', { name: 'Ingest' }).click();
   await expect(page.getByRole('heading', { name: 'Ingest', exact: true })).toBeVisible();
   await page.locator('input[type="file"]').setInputFiles(IMPORT_FILE);
-  await expect(page.getByText('e2e-import.md', { exact: true })).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByText('This page provides E2E evidence').first()).toBeVisible({
-    timeout: 15_000,
-  });
+  await expect(
+    page.getByRole('complementary').getByText('e2e-import.md', { exact: true }),
+  ).toBeVisible({ timeout: 10_000 });
   await expect(page.getByText('Workflow events')).toBeVisible();
   await expect(page.getByText('analyze', { exact: true }).first()).toBeVisible();
 

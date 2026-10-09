@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use corpusbot_agent::{ConceptDraft, DraftPlan, DraftSection, EntityDraft, LlmClient, SourceAgent};
+use corpusbot_agent::{
+    ConceptDraft, DraftPlan, DraftSection, EntityDraft, LlmClient, SourceAgent, validate_draft_plan,
+};
 use corpusbot_core::{
     Frontmatter, IsoDate, PageIdentity, PageType, RawReference, ResourceId, ResourceRevision,
     Revision, SourceRef, WikiDoc, Wikilink, split_raw_markdown,
@@ -104,12 +106,8 @@ where
         original_name: &str,
         markdown: &str,
     ) -> Result<IngestResult> {
-        let temporary = tempfile::tempdir()?;
-        let temporary_source = temporary.path().join(original_name);
-        std::fs::write(&temporary_source, markdown)?;
-        let result = self.ingest_file(workspace, &temporary_source).await?;
-        temporary.close()?;
-        Ok(result)
+        let original_name = validated_source_name(original_name)?;
+        self.ingest_bytes(workspace, original_name, markdown).await
     }
 
     pub async fn ingest_file(
@@ -135,6 +133,35 @@ where
         let content = std::fs::read(source_path)?;
         let markdown =
             String::from_utf8(content).map_err(|_| IngestError::InvalidSourceEncoding)?;
+        let original_name = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(IngestError::InvalidSourceName)?;
+        self.ingest_bytes(workspace, validated_source_name(original_name)?, &markdown)
+            .await
+    }
+
+    async fn ingest_bytes(
+        &self,
+        workspace: &Workspace,
+        original_name: &str,
+        markdown: &str,
+    ) -> Result<IngestResult> {
+        let status = workspace.status()?;
+        if status.recovery_pending {
+            return Err(corpusbot_store::StoreError::RecoveryPending.into());
+        }
+        if let Some(state) = status.unsafe_state {
+            return Err(IngestError::Vcs(corpusbot_vcs::VcsError::UnsafeState(
+                state,
+            )));
+        }
+        if !status.dirty_paths.is_empty() {
+            return Err(IngestError::WorkspaceDirty {
+                paths: status.dirty_paths,
+            });
+        }
+
         let sha256 = hex(markdown.as_bytes());
         if let Some(source) = workspace.source_by_sha(&sha256)? {
             return Ok(IngestResult::Duplicate {
@@ -143,11 +170,6 @@ where
             });
         }
 
-        let original_name = source_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty() && !matches!(*name, "." | ".."))
-            .ok_or(IngestError::InvalidSourceName)?;
         let now = OffsetDateTime::now_utc();
         let source_id = format!("src_{}", &sha256[..24]);
         let source_version_id = format!("ver_{}", &sha256[..24]);
@@ -165,7 +187,7 @@ where
 
         // Keep the raw file unchanged, but don't let its frontmatter leak into
         // LLM analysis and generation prompts.
-        let source_markdown = split_raw_markdown(&markdown).body;
+        let source_markdown = split_raw_markdown(markdown).body;
 
         self.report_progress(IngestStage::Analyze, &run_id);
         let analysis = self
@@ -194,7 +216,7 @@ where
                 &related,
             )
             .await?;
-        validate_plan(&plan, 1)?;
+        validate_plan(&plan, workspace.template(), 1)?;
         self.report_progress(IngestStage::Commit, &run_id);
 
         let source_page = format!("wiki/sources/{source_version_id}.md");
@@ -267,7 +289,7 @@ where
         let mut touched = vec![ResourceRevision::absent(ResourceId::new(&raw_path)?)];
         let mut created = vec![source_page.clone()];
         let mut updated = Vec::new();
-        files.insert(raw_path.clone(), markdown.clone().into_bytes());
+        files.insert(raw_path.clone(), markdown.to_owned().into_bytes());
         created.push(raw_path.clone());
         files.insert(source_page.clone(), source_markdown.clone().into_bytes());
         touched.push(ResourceRevision::absent(ResourceId::page(
@@ -400,6 +422,15 @@ where
     }
 }
 
+fn validated_source_name(value: &str) -> Result<&str> {
+    let valid =
+        !value.is_empty() && !matches!(value, "." | "..") && !value.contains(['/', '\\', '\0']);
+    if !valid {
+        return Err(IngestError::InvalidSourceName);
+    }
+    Ok(value)
+}
+
 fn existing_pages(workspace: &Workspace) -> Result<BTreeMap<String, ExistingWikiPage>> {
     let mut pages = BTreeMap::new();
     for entry in walkdir::WalkDir::new(workspace.paths().wiki_dir.clone()).sort_by_file_name() {
@@ -472,7 +503,7 @@ fn unique_concepts(
     Ok(selected)
 }
 
-fn validate_plan(plan: &DraftPlan, attempt: u32) -> Result<()> {
+fn validate_plan(plan: &DraftPlan, template: corpusbot_core::Template, attempt: u32) -> Result<()> {
     if plan.source_summary.trim().is_empty() {
         return Err(IngestError::SelfAudit(format!(
             "attempt {attempt}: source summary is empty"
@@ -483,21 +514,10 @@ fn validate_plan(plan: &DraftPlan, attempt: u32) -> Result<()> {
             "attempt {attempt}: source summary is too long"
         )));
     }
-    for entity in &plan.entities {
-        if entity.name.trim().is_empty() || entity.summary.trim().chars().count() < 8 {
-            return Err(IngestError::SelfAudit(format!(
-                "attempt {attempt}: invalid entity {}",
-                entity.name
-            )));
-        }
-    }
-    for concept in &plan.concepts {
-        if concept.name.trim().is_empty() || concept.definition.trim().chars().count() < 8 {
-            return Err(IngestError::SelfAudit(format!(
-                "attempt {attempt}: invalid concept {}",
-                concept.name
-            )));
-        }
+    if let Some(reason) = validate_draft_plan(plan, template) {
+        return Err(IngestError::SelfAudit(format!(
+            "attempt {attempt}: {reason}"
+        )));
     }
     Ok(())
 }
@@ -1236,6 +1256,22 @@ Raft elects a leader before replicating log entries. A candidate needs a majorit
             Err(IngestError::WorkspaceDirty { .. })
         ));
         std::fs::remove_file(source)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn content_import_rejects_path_like_names() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        corpusbot_store::Workspace::init(root.path(), Template::Research)?;
+        let workspace = Workspace::open(root.path(), Template::Research)?;
+        let ingestor = Ingestor::new(FakeLlmClient::new(Vec::<String>::new()));
+
+        for name in ["../escape.md", "/etc/passwd", "nested/source.md", "..", ""] {
+            assert!(matches!(
+                ingestor.ingest_content(&workspace, name, SOURCE).await,
+                Err(IngestError::InvalidSourceName)
+            ));
+        }
         Ok(())
     }
 
